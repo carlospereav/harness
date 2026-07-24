@@ -1,32 +1,115 @@
-# Harness — Protocolos de Desarrollo para Antigravity
+# Harness — Global Development Harness for OpenCode
 
-Este repositorio contiene los workflows (protocolos) que Antigravity debe seguir al trabajar en tus proyectos de desarrollo.
+Collection of skills and agents that enforce a rigorous development workflow:
+plan, implement, evaluate (with retry-loop), security review, and certified
+commit+push. Works across **all projects** on your machine.
 
-## Cómo usar
+## How it works
 
-### Opción 1: Referencia desde GEMINI.md (Recomendado)
-En el `GEMINI.md` de cualquiera de tus proyectos, añade una referencia a los workflows que quieras activar:
+The harness is stored in this repo (`opencode/`) and synced to your global
+opencode config (`~/.config/opencode/`) via a PowerShell script.
 
-```markdown
-## Workflows
+Once synced, opencode detects the skills, agents, and commands globally.
+When you type `/harness <task>` in any project, opencode runs the full
+workflow automatically.
 
-Sigue los protocolos definidos en:
-- [Revisión de Seguridad](../harness/workflows/security-review.md)
-- [Implementación y Revisión](../harness/workflows/implementation.md)
+## Installation
+
+```powershell
+cd harness
+.\sync.ps1 -DryRun     # preview what will change
+.\sync.ps1             # install to ~/.config/opencode/
 ```
 
-> **Nota:** Esto asume que `harness` está al mismo nivel que tus otros repos en `C:\Users\carlo\GitHub\`.
+Restart opencode after syncing.
 
-### Opción 2: Copiar los workflows
-Copia los archivos de `workflows/` directamente al directorio `.gemini/` o a la raíz de tu proyecto.
+## What gets installed
 
-## Workflows disponibles
+| Path | Purpose |
+|---|---|
+| `AGENTS.md` | Always-on global rule: route implement tasks through harness |
+| `skills/harness-plan/` | Phase 1+2: investigate project + define plan with acceptance criteria |
+| `skills/harness-implement/` | Phase 3: implement the approved plan |
+| `skills/harness-evaluate/` | Phase 4: evaluate via read-only `evaluator` subagent; retry up to 3x |
+| `skills/harness-security-review/` | Phase 5: audit git diff via read-only `security-auditor` subagent; commit+push |
+| `agents/evaluator.md` | Hidden subagent, `edit: deny`: impartial verification of criteria |
+| `agents/security-auditor.md` | Hidden subagent, `edit: deny`: vulnerability audit before commit |
+| `commands/harness.md` | `/harness <task>` command that kicks off the full loop |
 
-| Workflow | Archivo | Descripción |
-|---|---|---|
-| **Security Review** | `workflows/security-review.md` | Auditoría de seguridad del git diff antes de commitear |
-| **Implementation** | `workflows/implementation.md` | Flujo iterativo de implementación + auto-revisión |
+## Workflow
 
-## Filosofía
+```
+/harness "add pagination to /users"
+  → harness-plan (investigate + define criteria, WAIT for approval)
+  → harness-implement (write code)
+  → harness-evaluate → @evaluator (verify rubric)
+       ❌ fail → back to implement (max 3 iterations)
+  → harness-security-review → @security-auditor (audit diff)
+       HIGH finding → back to implement
+  → git commit (user approves via ask gate)
+  → git push   (user approves via ask gate)
+```
 
-El objetivo de este repositorio es ir construyendo progresivamente un sistema de protocolos donde puedas delegar cada vez más tareas de programación y gestión de contexto a Antigravity, manteniendo la calidad y la seguridad mediante flujos de revisión estructurados.
+## Prerequisites
+
+Your `~/.config/opencode/opencode.jsonc` must have these permissions so the
+commit/push step prompts you for approval:
+
+```jsonc
+"bash": {
+  "*": "allow",
+  "git commit *": "ask",
+  "git push *": "ask",
+  "git push --force*": "deny"
+}
+```
+
+The sync script **never** touches your `opencode.jsonc`. Verify these gates
+are present before using the harness.
+
+## Optional: different models per role
+
+The evaluator and security-auditor subagents inherit your primary model by
+default. To use a faster/cheaper model for reviews, uncomment and set the
+`model` field in:
+
+- `opencode/agents/evaluator.md`
+- `opencode/agents/security-auditor.md`
+
+Example: `model: anthropic/claude-haiku-4-20250514`
+
+Run `sync.ps1` again after editing.
+
+## Structure
+
+```
+harness/
+├── opencode/                         # source of truth (mirrors ~/.config/opencode/)
+│   ├── AGENTS.md
+│   ├── agents/
+│   │   ├── evaluator.md
+│   │   └── security-auditor.md
+│   ├── commands/
+│   │   └── harness.md
+│   └── skills/
+│       ├── harness-plan/SKILL.md
+│       ├── harness-implement/SKILL.md
+│       ├── harness-evaluate/SKILL.md
+│       └── harness-security-review/SKILL.md
+├── sync.ps1
+└── README.md
+```
+
+## Adding new skills or agents
+
+1. Create the file under `opencode/skills/<name>/SKILL.md` or
+   `opencode/agents/<name>.md`.
+2. Run `.\sync.ps1` to install globally.
+3. Commit to version them.
+
+## Removing a skill or agent
+
+Delete the file from this repo and commit. Then manually delete the
+corresponding file from `~/.config/opencode/skills/<name>/` or
+`~/.config/opencode/agents/<name>.md`. The sync script is additive only
+(it overwrites but does not delete stale files from the target).
