@@ -106,3 +106,51 @@ Delete the file from this repo and commit. Then manually delete the
 corresponding file from `~/.config/opencode/skills/<name>/` or
 `~/.config/opencode/agents/<name>.md`. The sync script is additive only
 (it overwrites but does not delete stale files from the target).
+
+## Kaggle Notebook editing system
+
+The `kaggle-notebook` skill + `/kaggle` command let opencode create, edit and
+push **private** Kaggle notebooks (kernels) automatically. Notebook source code
+lives in a workspace **outside** this git repo (`~/kaggle-workspace` by
+default) so it never leaks to GitHub.
+
+### One-time setup
+
+```powershell
+.\opencode\skills\kaggle-notebook\scripts\setup.ps1
+```
+
+This installs `kaggle` + `nbformat`, creates the workspace, and checks for
+Kaggle credentials at `~/.kaggle/kaggle.json`. If credentials are missing,
+get a token from https://www.kaggle.com/settings -> API -> Create New Token
+and save it as `~/.kaggle/kaggle.json`.
+
+### Usage
+
+```text
+/kaggle crea un notebook que analice el dataset <owner>/<dataset>
+```
+
+Under the hood the skill uses the helper CLI at
+`opencode/skills/kaggle-notebook/scripts/kaggle_nb.py`:
+
+```text
+python kaggle_nb.py --help
+python kaggle_nb.py setup
+python kaggle_nb.py new <slug> [--title T] [--gpu] [--internet] [--dataset D]
+python kaggle_nb.py pull <owner>/<slug>
+python kaggle_nb.py write-code <slug> --from <file.py>
+python kaggle_nb.py append-code <slug> --from <file.py>
+python kaggle_nb.py push <slug> [--dry-run]
+python kaggle_nb.py status <owner>/<slug>
+python kaggle_nb.py output <owner>/<slug> [--to DIR]
+python kaggle_nb.py list [user]
+```
+
+### Privacy guarantees
+
+- Notebooks are pushed with `"is_private": "true"` in `kernel-metadata.json`.
+- Notebook source code lives in `~/kaggle-workspace` (override with
+  `KAGGLE_WORKSPACE`) which is **git-ignored** by this repo.
+- Credentials (`kaggle.json`) are **never** committed.
+- `git status` will never show notebook code or tokens.

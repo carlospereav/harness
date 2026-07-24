@@ -216,3 +216,11 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Kaggle notebook workspace (notebook code lives here, never in this repo).
+# Default location is ~/kaggle-workspace but we ignore any local copy too.
+/kaggle-workspace/
+kaggle-workspace/
+# Kaggle credentials — must NEVER be committed.
+*.kaggle.json
+kaggle.json
