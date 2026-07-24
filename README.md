@@ -28,13 +28,14 @@ Restart opencode after syncing.
 | Path | Purpose |
 |---|---|
 | `AGENTS.md` | Always-on global rule: route implement tasks through harness |
+| `agents/harness.md` | Primary agent with baked-in permissions (task allowlist, destructive deny, commit/push ask). Structural enforcement of the protocol. |
+| `agents/evaluator.md` | Hidden subagent, `edit: deny`, `task: deny`: impartial verification of criteria |
+| `agents/security-auditor.md` | Hidden subagent, `edit: deny`, `task: deny`: vulnerability audit before commit |
 | `skills/harness-plan/` | Phase 1+2: investigate project + define plan with acceptance criteria |
 | `skills/harness-implement/` | Phase 3: implement the approved plan |
 | `skills/harness-evaluate/` | Phase 4: evaluate via read-only `evaluator` subagent; retry up to 3x |
 | `skills/harness-security-review/` | Phase 5: audit git diff via read-only `security-auditor` subagent; commit+push |
-| `agents/evaluator.md` | Hidden subagent, `edit: deny`: impartial verification of criteria |
-| `agents/security-auditor.md` | Hidden subagent, `edit: deny`: vulnerability audit before commit |
-| `commands/harness.md` | `/harness <task>` command that kicks off the full loop |
+| `commands/harness.md` | `/harness <task>` command that kicks off the full loop (`agent: harness`) |
 
 ## Workflow
 
@@ -52,20 +53,11 @@ Restart opencode after syncing.
 
 ## Prerequisites
 
-Your `~/.config/opencode/opencode.jsonc` must have these permissions so the
-commit/push step prompts you for approval:
+The harness agent bakes in all required permissions (task allowlist, git gates,
+destructive deny). No manual `opencode.jsonc` configuration is needed for
+commit/push approval — it's enforced structurally by the agent.
 
-```jsonc
-"bash": {
-  "*": "allow",
-  "git commit *": "ask",
-  "git push *": "ask",
-  "git push --force*": "deny"
-}
-```
-
-The sync script **never** touches your `opencode.jsonc`. Verify these gates
-are present before using the harness.
+The sync script **never** touches your `opencode.jsonc`.
 
 ## Optional: different models per role
 
@@ -87,6 +79,7 @@ harness/
 ├── opencode/                         # source of truth (mirrors ~/.config/opencode/)
 │   ├── AGENTS.md
 │   ├── agents/
+│   │   ├── harness.md
 │   │   ├── evaluator.md
 │   │   └── security-auditor.md
 │   ├── commands/

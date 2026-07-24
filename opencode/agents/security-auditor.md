@@ -4,6 +4,7 @@ mode: subagent
 hidden: true
 permission:
   edit: deny
+  task: deny
   bash:
     "*": allow
     "git commit*": deny

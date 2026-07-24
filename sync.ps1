@@ -71,12 +71,8 @@ Write-Host ""
 Write-Host "NOTE: opencode.jsonc was NOT touched."
 Write-Host "Your personal permissions and config remain intact."
 Write-Host ""
-Write-Host "Verify this is present in your opencode.jsonc:"
-Write-Host '  "git commit *": "ask"'
-Write-Host '  "git push *": "ask"'
-Write-Host '  "git push --force*": "deny"'
-Write-Host ""
-Write-Host "These 'ask' gates enforce the security-review-before-commit workflow."
+Write-Host "Permissions are baked into the harness agent (task allowlist, git gates)."
+Write-Host "No manual opencode.jsonc configuration is required."
 
 if (-not $DryRun) {
     Write-Host ""

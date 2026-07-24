@@ -21,3 +21,9 @@ before committing.
 
 NEVER present code to the user without passing evaluation and security review.
 If the user explicitly asks to skip a phase, confirm with them before doing so.
+
+The harness enforces structural guards via the dedicated `harness` primary agent:
+- Only `evaluator` and `security-auditor` subagents can be spawned (task allowlist).
+- Destructive git commands (`push --force`, `reset --hard`, `checkout --`) are denied.
+- `git commit` and `git push` require user approval (ask gate).
+- No manual `opencode.jsonc` configuration is needed — permissions are baked in.
