@@ -1,29 +1,50 @@
 # Harness — Global Development Harness for OpenCode
 
-Collection of skills and agents that enforce a rigorous development workflow:
-plan, implement, evaluate (with retry-loop), security review, and certified
-commit+push. Works across **all projects** on your machine.
+Two **decoupled** parts that ship from this repo and install into the global
+opencode config (`~/.config/opencode/`):
+
+| Part | Source tree | Purpose |
+|---|---|---|
+| **Harness** | `opencode/` | The original development workflow: plan, implement, evaluate (with retry-loop), security review, and certified commit+push. Works across **all projects**. |
+| **Kaggle opencode extensions** | `opencode-kaggle/` | Private-Kaggle notebook editing (`/kaggle`) and a universal Kaggle competition harness (`/competition`). Fully self-contained in the `opencode-kaggle/` tree. |
+
+Both parts are synced with the same `sync.ps1` installer and land side-by-side
+under `~/.config/opencode/` so they share the existing `harness` primary agent.
+They no longer share a source tree: each owns its own `commands/` and `skills/`.
+
+Every file in either tree is opencode configuration (agents, commands, skills),
+just split by concern: the generic dev-workflow harness in `opencode/`, the
+Kaggle-specific skills/commands in `opencode-kaggle/`.
 
 ## How it works
 
-The harness is stored in this repo (`opencode/`) and synced to your global
-opencode config (`~/.config/opencode/`) via a PowerShell script.
+The two trees are stored in this repo and synced to your global opencode config
+via a PowerShell script:
 
-Once synced, opencode detects the skills, agents, and commands globally.
-When you type `/harness <task>` in any project, opencode runs the full
-workflow automatically.
+```
+harness/
+├── opencode/             # SOURCE: original harness (AGENTS.md, agents/, commands/, skills/)
+├── opencode-kaggle/     # SOURCE: Kaggle opencode extensions (commands/, skills/)
+└── sync.ps1              # installs BOTH trees into ~/.config/opencode/
+```
+
+Once synced, opencode detects the skills, agents, and commands globally. When
+you type `/harness <task>`, `/kaggle <task>` or `/competition <task>` in any
+project, opencode runs the corresponding workflow.
 
 ## Installation
 
 ```powershell
 cd harness
-.\sync.ps1 -DryRun     # preview what will change
-.\sync.ps1             # install to ~/.config/opencode/
+.\sync.ps1 -DryRun            # preview what will change (both trees)
+.\sync.ps1                    # install both trees to ~/.config/opencode/
+.\sync.ps1 -OnlyHarness       # install ONLY the original harness
+.\sync.ps1 -OnlyKaggle        # install ONLY the Kaggle opencode extensions
 ```
 
 Restart opencode after syncing.
 
-## What gets installed
+## What gets installed (original harness — from `opencode/`)
 
 | Path | Purpose |
 |---|---|
@@ -37,18 +58,31 @@ Restart opencode after syncing.
 | `skills/harness-security-review/` | Phase 5: audit git diff via read-only `security-auditor` subagent; commit+push |
 | `commands/harness.md` | `/harness <task>` command that kicks off the full loop (`agent: harness`) |
 
-## Workflow
+## What gets installed (Kaggle extensions — from `opencode-kaggle/`)
+
+| Path | Purpose |
+|---|---|
+| `skills/kaggle-notebook/` | Create, edit and push **private** Kaggle notebooks (kernels). Notebook code lives outside any git repo. |
+| `skills/kaggle-competition/` | Universal Kaggle competition harness: 5-node pipeline (DataIngestion -> DataProcessing -> Experimentation -> Evaluation -> DeploymentSync), ML or GenAI, file or notebook submission. |
+| `commands/kaggle.md` | `/kaggle <task>` command (`agent: harness`). |
+| `commands/competition.md` | `/competition <task>` command (`agent: harness`). |
+
+The `kaggle-competition` skill reuses `kaggle-notebook` for ALL Kaggle
+connectivity (credentials, workspace, notebook injection, privacy, slug safety)
+— nothing Kaggle-related is duplicated.
+
+## Workflow (original harness)
 
 ```
 /harness "add pagination to /users"
-  → harness-plan (investigate + define criteria, WAIT for approval)
-  → harness-implement (write code)
-  → harness-evaluate → @evaluator (verify rubric)
-       ❌ fail → back to implement (max 3 iterations)
-  → harness-security-review → @security-auditor (audit diff)
-       HIGH finding → back to implement
-  → git commit (user approves via ask gate)
-  → git push   (user approves via ask gate)
+  -> harness-plan (investigate + define criteria, WAIT for approval)
+  -> harness-implement (write code)
+  -> harness-evaluate -> @evaluator (verify rubric)
+       fail -> back to implement (max 3 iterations)
+  -> harness-security-review -> @security-auditor (audit diff)
+       HIGH finding -> back to implement
+  -> git commit (user approves via ask gate)
+  -> git push   (user approves via ask gate)
 ```
 
 ## Prerequisites
@@ -70,13 +104,14 @@ default. To use a faster/cheaper model for reviews, uncomment and set the
 
 Example: `model: anthropic/claude-haiku-4-20250514`
 
-Run `sync.ps1` again after editing.
+Run `sync.ps1` again after editing (omit `-OnlyKaggle` so the harness tree is
+included).
 
-## Structure
+## Repository structure
 
 ```
 harness/
-├── opencode/                         # source of truth (mirrors ~/.config/opencode/)
+├── opencode/                         # original harness (source of truth)
 │   ├── AGENTS.md
 │   ├── agents/
 │   │   ├── harness.md
@@ -89,15 +124,36 @@ harness/
 │       ├── harness-implement/SKILL.md
 │       ├── harness-evaluate/SKILL.md
 │       └── harness-security-review/SKILL.md
+├── opencode-kaggle/                 # Kaggle opencode extensions (decoupled)
+│   ├── commands/
+│   │   ├── kaggle.md
+│   │   └── competition.md
+│   └── skills/
+│       ├── kaggle-notebook/
+│       │   ├── SKILL.md
+│       │   └── scripts/  (kaggle_nb.py, setup.ps1, smoke_test.py)
+│       └── kaggle-competition/
+│           ├── SKILL.md
+│           ├── scripts/  (kaggle_comp.py, smoke_test.py)
+│           └── templates/ (genai/, ml/)
 ├── sync.ps1
 └── README.md
 ```
 
 ## Adding new skills or agents
 
+For the **harness** tree:
+
 1. Create the file under `opencode/skills/<name>/SKILL.md` or
    `opencode/agents/<name>.md`.
-2. Run `.\sync.ps1` to install globally.
+2. Run `.\sync.ps1` (or `.\sync.ps1 -OnlyHarness`).
+3. Commit to version them.
+
+For the **Kaggle** tree:
+
+1. Create the file under `opencode-kaggle/skills/<name>/SKILL.md` or
+   `opencode-kaggle/commands/<name>.md`.
+2. Run `.\sync.ps1 -OnlyKaggle`.
 3. Commit to version them.
 
 ## Removing a skill or agent
@@ -106,6 +162,8 @@ Delete the file from this repo and commit. Then manually delete the
 corresponding file from `~/.config/opencode/skills/<name>/` or
 `~/.config/opencode/agents/<name>.md`. The sync script is additive only
 (it overwrites but does not delete stale files from the target).
+
+# Kaggle opencode extensions
 
 ## Kaggle Notebook editing system
 
@@ -117,7 +175,7 @@ default) so it never leaks to GitHub.
 ### One-time setup
 
 ```powershell
-.\opencode\skills\kaggle-notebook\scripts\setup.ps1
+.\opencode-kaggle\skills\kaggle-notebook\scripts\setup.ps1
 ```
 
 This installs `kaggle` + `nbformat`, creates the workspace, and checks for
@@ -132,7 +190,7 @@ and save it as `~/.kaggle/kaggle.json`.
 ```
 
 Under the hood the skill uses the helper CLI at
-`opencode/skills/kaggle-notebook/scripts/kaggle_nb.py`:
+`opencode-kaggle/skills/kaggle-notebook/scripts/kaggle_nb.py`:
 
 ```text
 python kaggle_nb.py --help
@@ -162,9 +220,9 @@ append-code -> push) without contacting Kaggle and without credentials — it
 uses `--dry-run` and a throwaway temp workspace. Run it with:
 
 ```powershell
-python .\opencode\skills\kaggle-notebook\scripts\smoke_test.py
-python .\opencode\skills\kaggle-notebook\scripts\smoke_test.py -v       # verbose
-python .\opencode\skills\kaggle-notebook\scripts\smoke_test.py --keep   # keep temp workspace
+python .\opencode-kaggle\skills\kaggle-notebook\scripts\smoke_test.py
+python .\opencode-kaggle\skills\kaggle-notebook\scripts\smoke_test.py -v       # verbose
+python .\opencode-kaggle\skills\kaggle-notebook\scripts\smoke_test.py --keep  # keep temp workspace
 ```
 
 Exit code 0 means all checks passed. It covers syntax, the CLI help, the
@@ -213,7 +271,7 @@ print(f"#METRIC:bertscore={score:.4f}")
 
 The harness parses every `#METRIC:name=value` line in the notebook's stdout and
 selects the one matching `state.primary_metric`. Direction-aware
-(`state.minimize`): RMSE → lower wins, F1 → higher wins.
+(`state.minimize`): RMSE -> lower wins, F1 -> higher wins.
 
 ### Global state (`competition_state.json`)
 
@@ -227,8 +285,8 @@ and is **resumable**. It tracks `submission_mode`, `ai_mode`, `current_node`,
 ```text
 run --max-iters 1        # single-pass: walk all 5 nodes once and deploy
 run --max-iters N>1      # optimization loop: Experimentation <-> Evaluation -> gate
-                         #   gate: done (max-iters) | stop (plateau) | iterate
-                         #   deploy fires only if >=1 strict improvement (gate)
+                          #   gate: done (max-iters) | stop (plateau) | iterate
+                          #   deploy fires only if >=1 strict improvement (gate)
 ```
 
 `--simulate {improve,constant,degrade}` is a **dry-run only** knob to exercise
@@ -248,7 +306,7 @@ submit --mode auto   -> file if --from <file> supplied, else notebook
 /competition build a private GenAI notebook for <comp> and run one optimization pass
 ```
 
-Helper CLI at `opencode/skills/kaggle-competition/scripts/kaggle_comp.py`:
+Helper CLI at `opencode-kaggle/skills/kaggle-competition/scripts/kaggle_comp.py`:
 
 ```text
 python kaggle_comp.py --help
@@ -287,9 +345,9 @@ logic with `--dry-run` and a throwaway temp workspace — no network, no
 credentials:
 
 ```powershell
-python .\opencode\skills\kaggle-competition\scripts\smoke_test.py
-python .\opencode\skills\kaggle-competition\scripts\smoke_test.py -v
-python .\opencode\skills\kaggle-competition\scripts\smoke_test.py --keep
+python .\opencode-kaggle\skills\kaggle-competition\scripts\smoke_test.py
+python .\opencode-kaggle\skills\kaggle-competition\scripts\smoke_test.py -v
+python .\opencode-kaggle\skills\kaggle-competition\scripts\smoke_test.py --keep
 ```
 
 Exit code 0 means all checks passed: helper syntax, help, `kaggle_nb` reuse,

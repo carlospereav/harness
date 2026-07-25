@@ -151,7 +151,7 @@ competitions (where the notebook is the submission and Kaggle scores it).
 
 ## Helper CLI
 
-Location: `opencode/skills/kaggle-competition/scripts/kaggle_comp.py`
+Location: `opencode-kaggle/skills/kaggle-competition/scripts/kaggle_comp.py`
 
 ```text
 kaggle_comp.py --help
@@ -196,11 +196,11 @@ When the user asks to participate in a Kaggle competition:
 
 1. **Setup** (one-time, only if not done):
    ```powershell
-   python opencode\skills\kaggle-notebook\scripts\kaggle_nb.py setup
+   python opencode-kaggle\skills\kaggle-notebook\scripts\kaggle_nb.py setup
    ```
 2. **Init** the competition (scaffolds state + private notebook + metadata):
    ```powershell
-   python opencode\skills\kaggle-competition\scripts\kaggle_comp.py init <comp> --mode ml --submission notebook --gpu --internet
+   python opencode-kaggle\skills\kaggle-competition\scripts\kaggle_comp.py init <comp> --mode ml --submission notebook --gpu --internet
    ```
 3. **(Optional) detect / fetch data:**
    ```powershell

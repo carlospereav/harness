@@ -31,7 +31,7 @@ notebook source ever landing in a public GitHub repo.
 
 Run once:
 ```powershell
-.\opencode\skills\kaggle-notebook\scripts\setup.ps1
+.\opencode-kaggle\skills\kaggle-notebook\scripts\setup.ps1
 ```
 This installs `kaggle` + `nbformat`, creates the workspace, and verifies
 Kaggle credentials at `~/.kaggle/kaggle.json`.
@@ -44,7 +44,7 @@ https://www.kaggle.com/settings -> API -> Create New Token, and save it as
 
 ## Helper CLI
 
-Location: `opencode/skills/kaggle-notebook/scripts/kaggle_nb.py`
+Location: `opencode-kaggle/skills/kaggle-notebook/scripts/kaggle_nb.py`
 
 ```text
 kaggle_nb.py --help
@@ -71,7 +71,7 @@ When the user asks to create or edit a Kaggle notebook:
 
 1. **Scaffold** (only if the notebook does not already exist):
    ```powershell
-   python opencode\skills\kaggle-notebook\scripts\kaggle_nb.py new <slug> --title "<title>" [--gpu] [--internet]
+   python opencode-kaggle\skills\kaggle-notebook\scripts\kaggle_nb.py new <slug> --title "<title>" [--gpu] [--internet]
    ```
    This creates `~/kaggle-workspace/<slug>/` with:
    - `notebook.ipynb` (empty)
@@ -85,7 +85,7 @@ When the user asks to create or edit a Kaggle notebook:
 
 3. **Push.** Inject `code.py` into the notebook and upload it privately:
    ```powershell
-   python opencode\skills\kaggle-notebook\scripts\kaggle_nb.py push <slug>
+   python opencode-kaggle\skills\kaggle-notebook\scripts\kaggle_nb.py push <slug>
    ```
    The helper re-injects `code.py` whenever it is newer than
    `notebook.ipynb`, re-checks `is_private=true`, and runs
