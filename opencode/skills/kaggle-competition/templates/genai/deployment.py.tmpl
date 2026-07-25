@@ -1,0 +1,15 @@
+# DeploymentSync_Node - Generative AI (notebook finalization cell)
+# Purpose: write the submission artifact (jsonl/csv). The push/submit is done by
+# the harness DeploymentSync_Node action after this cell runs on Kaggle.
+import json
+
+sub_path = "submission.jsonl"
+if "chatml" in dir() and chatml:
+    with open(sub_path, "w", encoding="utf-8") as f:
+        for r in chatml:
+            pred = r["messages"][-1]["content"] if r.get("messages") else ""
+            f.write(json.dumps({"prediction": pred}) + "\n")
+    print(f"[deployment] wrote {sub_path} ({len(chatml)} rows)")
+else:
+    print("[deployment] no records; submission not generated")
+print("[deployment] ready for kaggle kernels push / competitions submit")

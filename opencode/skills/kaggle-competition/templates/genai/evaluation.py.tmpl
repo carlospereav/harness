@@ -1,0 +1,11 @@
+# Evaluation_Node - Generative AI
+# Purpose: compute the local success metric (BERTScore, RAGAS, LLM-as-a-Judge).
+# The PRIMARY metric marker drives best_local_score. Default metric for GenAI
+# mode is "bertscore" (higher is better); override in competition_state.json.
+import math
+
+# Placeholder score that improves across iterations so the loop has signal in
+# dry-run. Real code runs an eval framework (ragas, bert_score, jury, etc.).
+score = 0.55 + 0.03 * {{iteration}}
+print(f"#METRIC:bertscore={score:.4f}")
+print("[evaluation] generative metric computed; feeding best_local_score")

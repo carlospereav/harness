@@ -1,0 +1,16 @@
+# DeploymentSync_Node - Traditional ML (notebook finalization cell)
+# Purpose: finalize the submission artifact. The CLI push / submit is performed
+# by the harness (DeploymentSync_Node action) AFTER this cell runs on Kaggle.
+import pandas as pd
+
+sub_path = "submission.csv"
+if test_df is not None and "model" in dir() and model is not None:
+    feature_cols = [c for c in test_df.columns if not c.startswith("target")]
+    test_preds = model.predict(test_df[feature_cols])
+    id_col = "id" if "id" in test_df.columns else test_df.columns[0]
+    out = pd.DataFrame({id_col: test_df[id_col], "target": test_preds})
+    out.to_csv(sub_path, index=False)
+    print(f"[deployment] wrote {sub_path} ({len(out)} rows)")
+else:
+    print("[deployment] no model/test data; submission not generated")
+print("[deployment] ready for kaggle kernels push / competitions submit")

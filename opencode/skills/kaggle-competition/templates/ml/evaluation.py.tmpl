@@ -1,0 +1,17 @@
+# Evaluation_Node - Traditional ML
+# Purpose: compute the local success metric that drives best_local_score.
+from sklearn.metrics import f1_score
+
+score = 0.0
+if train_df is not None and "model" in dir() and model is not None:
+    feature_cols = [c for c in train_df.columns if not c.startswith("target")]
+    target_cols = [c for c in train_df.columns if c.startswith("target")]
+    if target_cols:
+        X = train_df[feature_cols]
+        y = train_df[target_cols[0]]
+        preds = model.predict(X)
+        score = float(f1_score(y, preds, average="binary"))
+# The PRIMARY metric marker. The harness parser keys on state.primary_metric
+# (default "f1" for ML). Direction (minimize) is set in competition_state.json.
+print(f"#METRIC:f1={score:.4f}")
+print("[evaluation] local metric computed; feeding best_local_score")

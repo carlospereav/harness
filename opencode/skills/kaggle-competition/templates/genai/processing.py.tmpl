@@ -1,0 +1,18 @@
+# DataProcessing_Node - Generative AI
+# Purpose: tokenize, chunk, embed, and structure prompts into ChatML / the exact
+# format the training/inference engine expects.
+
+
+def to_chatml(record):
+    return {
+        "messages": [
+            {"role": "user", "content": str(record.get("prompt", ""))},
+            {"role": "assistant", "content": str(record.get("response", ""))},
+        ]
+    }
+
+
+chatml = [to_chatml(r) for r in records]
+print(f"[processing] formatted {len(chatml)} ChatML examples")
+# NOTE: real pipelines tokenize here (e.g. transformers.AutoTokenizer) and may
+# create embeddings. The agent expands this cell per competition.

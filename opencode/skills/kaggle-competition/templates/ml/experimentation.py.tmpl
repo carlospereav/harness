@@ -1,0 +1,23 @@
+# Experimentation_Node - Traditional ML (optimization loop, iteration {{iteration}})
+# Purpose: train algorithms, tune hyperparameters, read stdout to evaluate.
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import cross_val_score
+
+# NOTE: the agent rewrites this cell each iteration based on Evaluation_Node
+# feedback. The metric emitted here is an intermediate training signal; the
+# PRIMARY metric is emitted by Evaluation_Node.
+model = None
+train_loss = 1.0
+if train_df is not None:
+    feature_cols = [c for c in train_df.columns if not c.startswith("target")]
+    target_cols = [c for c in train_df.columns if c.startswith("target")]
+    if target_cols:
+        X = train_df[feature_cols]
+        y = train_df[target_cols[0]]
+        n_estimators = 50 + 25 * {{iteration}}
+        model = RandomForestClassifier(n_estimators=n_estimators, random_state=42)
+        scores = cross_val_score(model, X, y, cv=3, scoring="f1")
+        train_loss = float(1.0 - scores.mean())
+        model.fit(X, y)
+print(f"#METRIC:train_loss={train_loss:.4f}")
+print(f"[experimentation iter={{iteration}}] model trained (n_estimators={50 + 25 * {{iteration}}})")

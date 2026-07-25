@@ -1,0 +1,12 @@
+# Experimentation_Node - Generative AI (LoRA/QLoRA optimization, iteration {{iteration}})
+# Purpose: fine-tune, run generation probes, tune temperature/Top-P.
+# NOTE: placeholder scaffold - the agent plugs in peft/trl LoRA on a base model.
+import math
+
+# Simulated training signal that improves with iterations (real code uses the
+# trainer's eval loss). The PRIMARY metric is emitted by Evaluation_Node.
+base_loss = 0.9
+train_loss = max(0.05, base_loss / (1 + {{iteration}}))
+temperature = max(0.1, 0.9 - 0.05 * {{iteration}})
+print(f"#METRIC:train_loss={train_loss:.4f}")
+print(f"[experimentation iter={{iteration}}] LoRA step done (temperature={temperature:.2f})")

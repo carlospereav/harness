@@ -171,3 +171,132 @@ Exit code 0 means all checks passed. It covers syntax, the CLI help, the
 scaffolding of a private notebook, code injection, dry-run push, and path
 traversal rejection (slug + owner). No network or `~/.kaggle/kaggle.json`
 required.
+
+## Kaggle Competition harness
+
+The `kaggle-competition` skill + `/competition` command implement a
+**universal** Kaggle competition harness as a 5-node pipeline with an
+optimization loop. It works for both **Traditional ML / data-science**
+competitions (CSV `submission.csv`) and **Generative AI / LLM** competitions
+(notebook/code submission), switching submission paths automatically. It
+**reuses the `kaggle-notebook` skill for all Kaggle connectivity** (credentials,
+workspace, notebook injection, privacy, slug safety) — nothing Kaggle-related
+is duplicated.
+
+### The 5 nodes
+
+1. **DataIngestion_Node** — load raw data from `/kaggle/input/<comp>`.
+   ML: CSVs into pandas. GenAI: JSONL corpora / text / vector stores. Also
+   detects submission mode (`file` vs `notebook`) and flavor (`ml` vs `genai`).
+2. **DataProcessing_Node** — transform into the engine's exact shape.
+   ML: imputation, normalization, feature engineering. GenAI: tokenization,
+   chunking, embeddings, ChatML structuring.
+3. **Experimentation_Node** *(the optimization loop)* — train, tune, read
+   Jupyter stdout. ML: LightGBM/RF, CV, hyperparameter search. GenAI: LoRA/QLoRA
+   fine-tuning, generation probes, temperature/Top-P tuning.
+4. **Evaluation_Node** — compute the local success metric feeding
+   `best_local_score`. ML: F1 / ROC-AUC / RMSE. GenAI: RAGAS, BERTScore,
+   LLM-as-a-Judge.
+5. **DeploymentSync_Node** — validate `kernel-metadata.json` and safely run
+   `kaggle kernels push -p` (notebook) or `kaggle competitions submit` (file).
+   Only fires when the submission gate passes.
+
+### The metric convention
+
+Generated evaluation code MUST print a parseable marker:
+
+```python
+print(f"#METRIC:f1={score:.4f}")
+print(f"#METRIC:rmse={rmse:.4f}")        # minimize=True in state
+print(f"#METRIC:bertscore={score:.4f}")
+```
+
+The harness parses every `#METRIC:name=value` line in the notebook's stdout and
+selects the one matching `state.primary_metric`. Direction-aware
+(`state.minimize`): RMSE → lower wins, F1 → higher wins.
+
+### Global state (`competition_state.json`)
+
+Lives in the competition workspace (`$KAGGLE_WORKSPACE/competitions/<comp>/`)
+and is **resumable**. It tracks `submission_mode`, `ai_mode`, `current_node`,
+`primary_metric`, `minimize`, `best_local_score`, `best_iteration`,
+`iterations`, `max_iterations`, `plateau_patience`, and `history`.
+
+### Optimization loop & termination
+
+```text
+run --max-iters 1        # single-pass: walk all 5 nodes once and deploy
+run --max-iters N>1      # optimization loop: Experimentation <-> Evaluation -> gate
+                         #   gate: done (max-iters) | stop (plateau) | iterate
+                         #   deploy fires only if >=1 strict improvement (gate)
+```
+
+`--simulate {improve,constant,degrade}` is a **dry-run only** knob to exercise
+the loop and gate offline without network or credentials.
+
+### Submission routing
+
+```text
+submit --mode file   -> kaggle competitions submit -f <file> -m <msg> <comp>
+submit --mode notebook -> kaggle kernels push -p <comp-dir> (after injecting code.py)
+submit --mode auto   -> file if --from <file> supplied, else notebook
+```
+
+### Usage
+
+```text
+/competition build a private GenAI notebook for <comp> and run one optimization pass
+```
+
+Helper CLI at `opencode/skills/kaggle-competition/scripts/kaggle_comp.py`:
+
+```text
+python kaggle_comp.py --help
+python kaggle_comp.py setup
+python kaggle_comp.py init <comp> [--mode ml|genai] [--submission auto|file|notebook] [--gpu] [--internet]
+python kaggle_comp.py data <comp> [--dry-run]
+python kaggle_comp.py detect <comp> [--from F] [--dry-run]
+python kaggle_comp.py render <comp> <node> [--mode ml|genai] [--to F]
+python kaggle_comp.py state <comp> [--show] [--update-metric NAME=VAL]
+python kaggle_comp.py run <comp> [--max-iters N] [--simulate improve|constant|degrade] [--dry-run]
+python kaggle_comp.py submit <comp> [--mode auto|file|notebook] [--from F] [-m msg] [--dry-run]
+python kaggle_comp.py status <comp> [--dry-run]
+python kaggle_comp.py leaderboard <comp> [--dry-run]
+```
+
+`<node>` for `render`: `ingestion | processing | experimentation | evaluation | deployment`.
+
+Competition workspace (all OUTSIDE any git repo):
+
+```text
+~/kaggle-workspace/competitions/<comp>/
+  competition_state.json   notebook.ipynb   kernel-metadata.json   code.py   data/
+```
+
+### Privacy guarantees (inherited from `kaggle-notebook`)
+
+- Notebooks pushed with `"is_private": "true"`, with `competition_sources=[<comp>]`.
+- Workspace + credentials never committed; `.gitignore` excludes them.
+- Competition names validated with the same path-traversal-safe `validate_slug`.
+- `git status` never shows competition code, state, or tokens.
+
+### Self-test (smoke test)
+
+A self-contained smoke test covers the whole pipeline + routing + loop/gate
+logic with `--dry-run` and a throwaway temp workspace — no network, no
+credentials:
+
+```powershell
+python .\opencode\skills\kaggle-competition\scripts\smoke_test.py
+python .\opencode\skills\kaggle-competition\scripts\smoke_test.py -v
+python .\opencode\skills\kaggle-competition\scripts\smoke_test.py --keep
+```
+
+Exit code 0 means all checks passed: helper syntax, help, `kaggle_nb` reuse,
+all 10 templates render to parseable Python with `#METRIC:` markers, init
+scaffolds a private notebook with `competition_sources`, state show/update +
+minimize direction, metric parser, 5-node run walk + dry-run push + privacy
+(ML and GenAI), submission routing (file/notebook/auto), `detect`, remote
+commands dry-run, path-traversal rejection, loop termination (max-iters +
+plateau), and submission gate (proceed/skip). No network or credentials
+required.

@@ -221,6 +221,10 @@ __marimo__/
 # Default location is ~/kaggle-workspace but we ignore any local copy too.
 /kaggle-workspace/
 kaggle-workspace/
+# Kaggle competition workspace (state, notebook, metadata, code, data).
+# Default location is ~/kaggle-workspace/competitions/. Defense-in-depth so a
+# --workspace override pointing inside the repo cannot leak notebook code.
+competitions/
 # Kaggle credentials — must NEVER be committed.
 *.kaggle.json
 kaggle.json

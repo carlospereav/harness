@@ -1,0 +1,24 @@
+# DataIngestion_Node - Generative AI
+# Competition: {{competition}}
+# Purpose: read large text corpora, JSONL instruction datasets, or vector
+# stores from the Kaggle input mount.
+import json
+import os
+
+DATA_DIR = "/kaggle/input/{{competition}}"
+print(f"[ingestion] scanning {DATA_DIR}")
+
+records = []
+if os.path.isdir(DATA_DIR):
+    for fname in sorted(os.listdir(DATA_DIR)):
+        fpath = os.path.join(DATA_DIR, fname)
+        if fname.endswith(".jsonl"):
+            with open(fpath, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        records.append(json.loads(line))
+        elif fname.endswith(".txt"):
+            with open(fpath, "r", encoding="utf-8") as f:
+                records.append({"prompt": "", "response": f.read()})
+print(f"[ingestion] loaded {len(records)} records")
