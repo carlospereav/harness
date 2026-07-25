@@ -154,3 +154,20 @@ python kaggle_nb.py list [user]
   `KAGGLE_WORKSPACE`) which is **git-ignored** by this repo.
 - Credentials (`kaggle.json`) are **never** committed.
 - `git status` will never show notebook code or tokens.
+
+### Self-test (smoke test)
+
+A self-contained smoke test verifies the whole lifecycle (new -> write-code ->
+append-code -> push) without contacting Kaggle and without credentials — it
+uses `--dry-run` and a throwaway temp workspace. Run it with:
+
+```powershell
+python .\opencode\skills\kaggle-notebook\scripts\smoke_test.py
+python .\opencode\skills\kaggle-notebook\scripts\smoke_test.py -v       # verbose
+python .\opencode\skills\kaggle-notebook\scripts\smoke_test.py --keep   # keep temp workspace
+```
+
+Exit code 0 means all checks passed. It covers syntax, the CLI help, the
+scaffolding of a private notebook, code injection, dry-run push, and path
+traversal rejection (slug + owner). No network or `~/.kaggle/kaggle.json`
+required.
