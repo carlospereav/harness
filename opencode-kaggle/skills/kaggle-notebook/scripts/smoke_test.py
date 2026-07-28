@@ -198,6 +198,33 @@ def check_owner_traversal(r: Results, ws: Path) -> None:
     r.record(name, all_rejected, f"tested {len(bad_refs)} refs")
 
 
+def check_default_metadata_private_and_slug(r: Results, ws: Path) -> None:
+    name = "11 default_metadata private=False -> is_private=false; id prefixed with user/"
+    # Import kaggle_nb in-process.
+    sys.path.insert(0, str(HERE))
+    import kaggle_nb as knb  # type: ignore
+
+    # Stub a username via env so _resolve_kaggle_username finds it.
+    old_env = os.environ.get("KAGGLE_USERNAME")
+    os.environ["KAGGLE_USERNAME"] = "smoketest"
+    try:
+        meta_public = knb.default_metadata("my-slug", private=False)
+        meta_private = knb.default_metadata("my-slug", private=True)
+        meta_no_user = knb.default_metadata("owner/explicit")  # already has /
+    finally:
+        if old_env is not None:
+            os.environ["KAGGLE_USERNAME"] = old_env
+        else:
+            os.environ.pop("KAGGLE_USERNAME", None)
+
+    public_ok = str(meta_public.get("is_private", "")) == "false"
+    private_ok = str(meta_private.get("is_private", "")) == "true"
+    id_prefixed = meta_public.get("id", "").startswith("smoketest/")
+    explicit_id_ok = meta_no_user.get("id") == "owner/explicit"
+    r.record(name, public_ok and private_ok and id_prefixed and explicit_id_ok,
+             f"public={public_ok} private={private_ok} id_prefixed={id_prefixed} explicit={explicit_id_ok}")
+
+
 def check_clean(r: Results, _ws: Path) -> None:
     name = "10 runs to completion (no uncaught exceptions)"
     r.record(name, True)
@@ -232,6 +259,7 @@ def main() -> int:
         check_push_dryrun(r, ws)
         check_traversal(r, ws)
         check_owner_traversal(r, ws)
+        check_default_metadata_private_and_slug(r, ws)
         check_clean(r, ws)
     except Exception as e:  # noqa: BLE001 - safety net
         r.failed += 1

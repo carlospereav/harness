@@ -1,19 +1,23 @@
 # DataIngestion_Node - Traditional ML
 # Competition: {{competition}}
-# Purpose: access and load raw tabular data from the Kaggle input mount.
+# Purpose: recursively walk /kaggle/input, print what's mounted, and load
+# train/test/sample-submission CSVs by name wherever they are found.
 import os
 
 import pandas as pd
 
-DATA_DIR = "/kaggle/input/{{competition}}"
-print(f"[ingestion] scanning {DATA_DIR}")
+DATA_DIR = "/kaggle/input"
+print(f"[ingestion] walking {DATA_DIR} (competition: {{competition}})")
 
 train_df = None
 test_df = None
 sample_sub = None
-if os.path.isdir(DATA_DIR):
-    for fname in sorted(os.listdir(DATA_DIR)):
-        fpath = os.path.join(DATA_DIR, fname)
+
+# Walk recursively and print every file found.
+for root, dirs, files in os.walk(DATA_DIR):
+    for fname in sorted(files):
+        fpath = os.path.join(root, fname)
+        print(f"[ingestion]   found: {fpath}")
         if fname.endswith("train.csv") or fname.endswith("train.zip"):
             train_df = pd.read_csv(fpath)
         elif fname.endswith("test.csv") or fname.endswith("test.zip"):
@@ -23,7 +27,13 @@ if os.path.isdir(DATA_DIR):
 
 if train_df is not None:
     print(f"[ingestion] train shape: {train_df.shape}")
+    print(f"[ingestion] train columns: {list(train_df.columns)}")
+else:
+    print("[ingestion] WARNING: no train.csv found — check competition data mount")
+
 if test_df is not None:
     print(f"[ingestion] test shape: {test_df.shape}")
+    print(f"[ingestion] test columns: {list(test_df.columns)}")
+
 if sample_sub is not None:
     print(f"[ingestion] sample_submission shape: {sample_sub.shape}")

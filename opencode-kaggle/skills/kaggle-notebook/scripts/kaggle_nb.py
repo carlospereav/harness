@@ -4,7 +4,8 @@ notebooks from opencode.
 
 The notebook source code lives in a workspace OUTSIDE any public git repo
 (default: ~/kaggle-workspace) so it never leaks to GitHub. Notebooks are
-always pushed as private kernels (``is_private: "true"``) to Kaggle.
+PRIVATE by default for safety; public publishing (e.g. for competition medals)
+is opt-in with the ``--public`` flag.
 
 Usage:
     python kaggle_nb.py --help
@@ -139,6 +140,67 @@ def _kaggle_api_available() -> bool:
         return False
 
 
+def _resolve_kaggle_username() -> str | None:
+    """Best-effort Kaggle username resolution.
+    Tries: kaggle config view > KAGGLE_USERNAME env > kaggle.json > credentials.json.
+    Returns the username or None if unresolvable.
+    """
+    # 1. `kaggle config view` (parses "username: <val>" line)
+    if shutil.which("kaggle"):
+        try:
+            proc = subprocess.run(
+                ["kaggle", "config", "view"],
+                capture_output=True, text=True, encoding="utf-8", timeout=10,
+            )
+            if proc.returncode == 0:
+                for line in proc.stdout.splitlines():
+                    line = line.strip()
+                    if line.lower().startswith("username:"):
+                        val = line.split(":", 1)[1].strip()
+                        if val:
+                            return val
+            # stderr may also contain the username on some versions
+            for line in proc.stderr.splitlines():
+                line = line.strip()
+                if line.lower().startswith("username:"):
+                    val = line.split(":", 1)[1].strip()
+                    if val:
+                        return val
+        except Exception:
+            pass
+
+    # 2. Environment variable
+    env_user = os.environ.get("KAGGLE_USERNAME", "").strip()
+    if env_user:
+        return env_user
+
+    # 3. kaggle.json (legacy)
+    kaggle_json = KAGGLE_CONFIG_DIR / "kaggle.json"
+    if kaggle_json.exists():
+        try:
+            with kaggle_json.open("r", encoding="utf-8") as f:
+                creds = json.load(f)
+            user = (creds.get("username") or "").strip()
+            if user:
+                return user
+        except Exception:
+            pass
+
+    # 4. credentials.json (OAuth)
+    creds_json = KAGGLE_CONFIG_DIR / "credentials.json"
+    if creds_json.exists():
+        try:
+            with creds_json.open("r", encoding="utf-8") as f:
+                creds = json.load(f)
+            user = (creds.get("username") or "").strip()
+            if user:
+                return user
+        except Exception:
+            pass
+
+    return None
+
+
 def _ensure_nbformat() -> None:
     if NBFORMAT_AVAILABLE:
         return
@@ -155,14 +217,24 @@ def _ensure_nbformat() -> None:
 # --------------------------------------------------------------------------- #
 
 def default_metadata(slug: str, *, title: str | None = None, gpu: bool = False,
-                    internet: bool = False, datasets: Iterable[str] = ()) -> dict:
+                    internet: bool = False, datasets: Iterable[str] = (),
+                    private: bool = False) -> dict:
+    # Resolve the kernel id: Kaggle requires "<username>/<slug>".
+    # If the slug is already an owner/slug pair, use it as-is.
+    # Otherwise, prefix with the resolved username if available.
+    kid = slug
+    if "/" not in slug:
+        user = _resolve_kaggle_username()
+        if user:
+            kid = f"{user}/{slug}"
+
     meta = {
-        "id": slug,
+        "id": kid,
         "title": title or slug,
         "code_file": "notebook.ipynb",
         "language": "python",
         "kernel_type": "notebook",
-        "is_private": "true",
+        "is_private": "true" if private else "false",
         "enable_gpu": "true" if gpu else "false",
         "enable_internet": "true" if internet else "false",
         "keywords": [],
@@ -288,11 +360,19 @@ def cmd_setup(args: argparse.Namespace) -> int:
         print("  nbformat   : OK")
 
     creds = KAGGLE_CONFIG_DIR / "kaggle.json"
-    print(f"  credentials: {creds}  ({'OK' if creds.exists() else 'MISSING'})")
-    if not creds.exists():
+    oauth = KAGGLE_CONFIG_DIR / "credentials.json"
+    has_legacy = creds.exists()
+    has_oauth = oauth.exists()
+    print(f"  kaggle.json       : {creds} ({'OK' if has_legacy else 'MISSING'})")
+    print(f"  credentials.json  : {oauth} ({'OK' if has_oauth else 'MISSING'})")
+    if has_legacy and has_oauth:
+        print("  [WARN] Both kaggle.json (legacy) and credentials.json (OAuth) exist.")
+        print("         Kaggle SDK v2+ prefers credentials.json. If API calls fail,")
+        print(f"         move kaggle.json aside:  mv {creds} {creds}.bak")
+    elif not has_legacy and not has_oauth:
         print("  -> get your token from https://www.kaggle.com/settings -> Create New Token")
         print(f"     save it as {creds}  (format: {{\"username\":\"...\",\"key\":\"...\"}})")
-    return 0
+        print("     OR  run:  kaggle auth login  (creates credentials.json)")
 
 
 def cmd_new(args: argparse.Namespace) -> int:
@@ -307,6 +387,7 @@ def cmd_new(args: argparse.Namespace) -> int:
         gpu=args.gpu,
         internet=args.internet,
         datasets=args.dataset,
+        private=True,  # scratch notebooks stay private by default (safety)
     )
     write_metadata(d, meta)
     write_empty_notebook(d)
@@ -361,23 +442,32 @@ def cmd_push(args: argparse.Namespace) -> int:
             print(f"  injecting {code_py.name} into notebook (code.py is newer)")
             set_notebook_code(d, read_code_file(code_py))
 
-    # Verify privacy
+    # Verify privacy — only force private when the field is missing/empty/None.
+    # If the metadata explicitly sets is_private="false" (public), honor it.
     try:
         meta = read_metadata(d)
-        if str(meta.get("is_private", "")).lower() != "true":
-            print("  [WARN] is_private != 'true'; forcing private to avoid GitHub leak")
+        priv = str(meta.get("is_private", "")).lower()
+        if priv not in ("true", "false"):
+            print("  [WARN] is_private missing/invalid; forcing private to avoid GitHub leak")
             meta["is_private"] = "true"
             write_metadata(d, meta)
-        else:
+        elif priv == "true":
             print("  is_private=true  (notebook stays private)")
+        else:
+            print("  is_private=false  (notebook will be PUBLIC — medals/lb eligible)")
     except FileNotFoundError:
         print("  [WARN] no kernel-metadata.json; creating a private one")
-        write_metadata(d, default_metadata(args.slug))
+        write_metadata(d, default_metadata(args.slug, private=True))
         write_empty_notebook(d)
 
     rc = _run(["kaggle", "kernels", "push", "-p", str(d)], dry_run=args.dry_run, cwd=d)
     if rc == 0 and not args.dry_run:
-        print(f"  pushed: https://www.kaggle.com/code/<user>/{args.slug}")
+        try:
+            meta = read_metadata(d)
+            kid = meta.get("id", args.slug)
+        except Exception:
+            kid = args.slug
+        print(f"  pushed: https://www.kaggle.com/code/{kid}")
     return rc
 
 

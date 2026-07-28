@@ -44,6 +44,8 @@ import json
 import os
 import re
 import sys
+import time
+import tempfile
 from pathlib import Path
 
 # --------------------------------------------------------------------------- #
@@ -154,25 +156,25 @@ def save_state(comp: str, state: dict, workspace: str | None = None) -> None:
 def comp_metadata(comp: str, *, title: str | None = None, gpu: bool = False,
                   internet: bool = False, datasets=()) -> dict:
     meta = kaggle_nb.default_metadata(
-        comp, title=title, gpu=gpu, internet=internet, datasets=datasets
+        comp, title=title, gpu=gpu, internet=internet, datasets=datasets,
+        private=False,  # competition notebooks must be public for medals
     )
     meta["competition_sources"] = [comp]  # attach to competition
     return meta
 
 
 def _validate_meta_for_deploy(d: Path, comp: str) -> None:
-    """Pre-flight check for DeploymentSync. Fixes privacy + competition_sources."""
+    """Pre-flight check for DeploymentSync. Fixes competition_sources + kernel_type.
+    Does NOT re-force privacy — competition notebooks default to public (medals)."""
     try:
         meta = kaggle_nb.read_metadata(d)
     except FileNotFoundError:
-        print("  [validate] metadata missing; creating private metadata")
+        print("  [validate] metadata missing; creating competition metadata")
         kaggle_nb.write_metadata(d, comp_metadata(comp))
         kaggle_nb.write_empty_notebook(d)
         return
     issues = []
-    if str(meta.get("is_private", "")).lower() != "true":
-        issues.append("is_private != true")
-        meta["is_private"] = "true"
+    # No longer re-forces is_private — honors whatever the metadata says.
     if comp not in (meta.get("competition_sources") or []):
         issues.append(f"competition_sources missing {comp}")
         meta["competition_sources"] = [comp]
@@ -183,7 +185,8 @@ def _validate_meta_for_deploy(d: Path, comp: str) -> None:
         print("  [validate] fixing: " + "; ".join(issues))
         kaggle_nb.write_metadata(d, meta)
     else:
-        print("  [validate] metadata OK (is_private=true, competition_sources set)")
+        priv = meta.get("is_private", "false")
+        print(f"  [validate] metadata OK (is_private={priv}, competition_sources set)")
 
 
 # --------------------------------------------------------------------------- #
@@ -360,8 +363,19 @@ def cmd_setup(args: argparse.Namespace) -> int:
     (ws / COMP_SUBDIR).mkdir(parents=True, exist_ok=True)
     print(f"  kaggle CLI : {'OK' if kaggle_nb._kaggle_available() else 'MISSING'}")
     print(f"  kaggle API : {'OK' if kaggle_nb._kaggle_api_available() else 'MISSING'}")
-    creds = kaggle_nb.KAGGLE_CONFIG_DIR / "kaggle.json"
-    print(f"  credentials: {creds} ({'OK' if creds.exists() else 'MISSING'})")
+
+    # Check both legacy and OAuth credentials.
+    legacy = kaggle_nb.KAGGLE_CONFIG_DIR / "kaggle.json"
+    oauth = kaggle_nb.KAGGLE_CONFIG_DIR / "credentials.json"
+    has_legacy = legacy.exists()
+    has_oauth = oauth.exists()
+    print(f"  kaggle.json       : {legacy} ({'OK' if has_legacy else 'MISSING'})")
+    print(f"  credentials.json  : {oauth} ({'OK' if has_oauth else 'MISSING'})")
+    if has_legacy and has_oauth:
+        print("  [WARN] Both kaggle.json (legacy) and credentials.json (OAuth) exist.")
+        print("         Kaggle SDK v2+ prefers credentials.json. If API calls fail,")
+        print(f"         move kaggle.json aside:  mv {legacy} {legacy}.bak")
+
     print(f"  templates  : {_TEMPLATES_DIR} ({'OK' if _TEMPLATES_DIR.exists() else 'MISSING'})")
     missing = [n for n in NODES
                for mode in ("ml", "genai")
@@ -407,7 +421,7 @@ def cmd_init(args: argparse.Namespace) -> int:
         encoding="utf-8",
     )
     print(f"  wrote {d / kaggle_nb.CODE_PY}")
-    print("  notebook PRIVATE (is_private=true), competition_sources set")
+    print("  notebook PUBLIC (is_private=false) — medals/lb eligible; competition_sources set")
     return 0
 
 
@@ -422,7 +436,28 @@ def cmd_data(args: argparse.Namespace) -> int:
     if args.file:
         cmd += ["-f", args.file]
     cmd += ["-p", str(dest), args.comp]
-    return kaggle_nb._run(cmd, dry_run=args.dry_run)
+
+    if args.dry_run:
+        return kaggle_nb._run(cmd, dry_run=True)
+
+    # Real run: capture stderr to detect 403 (rules not accepted).
+    import subprocess as _sp
+    printable = " ".join(cmd)
+    print(f"$ {printable}")
+    proc = _sp.run(cmd, capture_output=True, text=True, encoding="utf-8")
+    combined = (proc.stdout or "") + (proc.stderr or "")
+    print(proc.stdout or "")
+    if proc.stderr:
+        print(proc.stderr, file=sys.stderr)
+    if proc.returncode != 0:
+        if "403" in combined or "Forbidden" in combined or "forbidden" in combined.lower():
+            print()
+            print("  [ERROR] Access denied (HTTP 403). You must accept the competition rules first:")
+            print(f"           https://www.kaggle.com/competitions/{args.comp}/rules")
+            print("  [ERROR] Open that URL in your browser, click 'I Understand and Accept',")
+            print("          then re-run this command.")
+        return proc.returncode
+    return 0
 
 
 def cmd_detect(args: argparse.Namespace) -> int:
@@ -522,6 +557,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     max_iters = max(1, int(state["max_iterations"]))
     patience = max(1, int(state["plateau_patience"]))
     improved_any = False
+    push_failed = False
     i = 0
     while True:
         i += 1
@@ -535,13 +571,23 @@ def cmd_run(args: argparse.Namespace) -> int:
             # Real run: push notebook, let Kaggle execute it, fetch stdout.
             rc = _kaggle_push(comp, d, dry_run=False)
             if rc != 0:
-                print(f"  [run] notebook push failed (rc={rc}); aborting loop")
-                return rc
+                print(f"  [run] notebook push failed (rc={rc})")
+                print(f"  [run] The assembled notebook is left on disk at:")
+                print(f"         {d / 'notebook.ipynb'}")
+                print(f"  [run] After fixing auth or accepting the competition rules,")
+                print(f"         run:  kaggle_comp.py push-notebook {comp}")
+                push_failed = True
+                break
             stdout = _fetch_notebook_stdout(comp, d)
             metrics = parse_metrics(stdout)
             score = _pick_primary_metric(metrics, state["primary_metric"])
             if score is None:
-                print("  [run] no #METRIC: marker found in notebook stdout; aborting")
+                print("  [run] no #METRIC: marker found in notebook stdout")
+                print(f"  [run] The assembled notebook is left on disk at:")
+                print(f"         {d / 'notebook.ipynb'}")
+                print(f"  [run] Check the kernel output on Kaggle for errors, then")
+                print(f"         update the metric manually with:")
+                print(f"         kaggle_comp.py state {comp} --update-metric <name>=<val>")
                 return 2
 
         state = load_state(comp, args.workspace)
@@ -563,6 +609,11 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     # Assemble the notebook from code.py.
     kaggle_nb.set_notebook_code(d, code_py.read_text(encoding="utf-8"))
+    print(f"  [run] notebook assembled at {d / 'notebook.ipynb'}")
+
+    # Push failure: notebook is already assembled; skip final submission.
+    if push_failed:
+        return 1  # non-zero but recoverable — notebook is on disk
 
     # Submission gate: deploy iff single-pass, or at least one strict improvement.
     if max_iters == 1 or improved_any:
@@ -578,13 +629,117 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 
 def _fetch_notebook_stdout(comp: str, d: Path) -> str:
-    """Best-effort fetch of the notebook's stdout via kaggle kernels output.
+    """Fetch the notebook's stdout after a successful push.
 
-    Real implementations parse the downloaded log; here we provide a thin
-    helper that downloads to a temp dir and reads any .log / stdout-like file.
+    Resolves the kernel id, polls ``kaggle kernels status <id>`` until COMPLETE
+    (bounded loop, 10-second interval, max 60 iterations = 10 min), then
+    ``kaggle kernels output <id> -p <tmp>`` and parses the JSONL log's
+    ``data`` key, joining lines into the reconstructed stdout.
     """
-    print("  [run] fetching notebook stdout via `kaggle kernels output` ...")
-    return ""  # placeholder; agents/real runs override as needed
+    # Resolve the full kernel id (user/slug) from metadata if available.
+    try:
+        meta = kaggle_nb.read_metadata(d)
+        kid = meta.get("id", comp)
+    except Exception:
+        kid = comp
+    if "/" not in kid:
+        user = kaggle_nb._resolve_kaggle_username()
+        if user:
+            kid = f"{user}/{kid}"
+
+    print(f"  [fetch] polling kaggle kernels status {kid} ...")
+
+    # Poll status until COMPLETE (or error/timeout).
+    max_polls = 60
+    for _ in range(max_polls):
+        try:
+            import subprocess as _subprocess
+            cap = _subprocess.run(
+                ["kaggle", "kernels", "status", kid],
+                capture_output=True, text=True, encoding="utf-8", timeout=30,
+            )
+            combined = (cap.stdout or "") + (cap.stderr or "")
+        except Exception:
+            time.sleep(10)
+            continue
+        if "complete" in combined.lower() or "status\" has status \"complete\"" in combined.lower():
+            print(f"  [fetch] kernel {kid} status: COMPLETE")
+            break
+        if "error" in combined.lower() and "complete" not in combined.lower():
+            print(f"  [fetch] kernel {kid} has error status:\n{combined}")
+            return ""
+        print(f"  [fetch] waiting (10s) ...")
+        time.sleep(10)
+    else:
+        print(f"  [fetch] timed out waiting for kernel {kid} to complete")
+        return ""
+
+    # Download the output.
+    tmp_out = Path(tempfile.mkdtemp(prefix="kgo_"))
+    try:
+        rc = kaggle_nb._run(
+            ["kaggle", "kernels", "output", kid, "-p", str(tmp_out)], dry_run=False,
+        )
+        if rc != 0:
+            print(f"  [fetch] kaggle kernels output failed (rc={rc})")
+            return ""
+
+        # Find and parse the JSONL log file.
+        stdout_lines = _parse_jsonl_log_files(tmp_out)
+        if stdout_lines:
+            result = "\n".join(stdout_lines)
+            print(f"  [fetch] reconstructed stdout ({len(result)} chars)")
+            # Show last few lines for visibility
+            for line in result.splitlines()[-5:]:
+                print(f"         {line}")
+            return result
+        else:
+            print("  [fetch] no stdout entries found in kernel output log")
+            return ""
+    finally:
+        import shutil
+        try:
+            shutil.rmtree(tmp_out, ignore_errors=True)
+        except Exception:
+            pass
+
+
+def _parse_jsonl_log_files(output_dir: Path) -> list[str]:
+    """Parse kernel JSONL log files in *output_dir*, extracting ``data`` entries.
+
+    Each line in ``*.log`` files may be a JSON object with a ``data`` key;
+    its value (string or dict) is collected as a line of reconstructed stdout.
+    Non-JSON lines are passed through as-is.
+
+    Returns a list of stdout lines (may be empty).
+    """
+    log_files = sorted(output_dir.glob("*.log")) + sorted(output_dir.glob("**/*.log"))
+    stdout_lines: list[str] = []
+    for lf in log_files:
+        try:
+            text = lf.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                # Not JSONL — could be plain text log
+                stdout_lines.append(line)
+                continue
+            # Extract the "data" stream (stdout).
+            data = entry.get("data")
+            if isinstance(data, dict):
+                # Some kernel logs wrap stdout in data.text or data.output
+                text_val = data.get("text") or data.get("output") or ""
+                for sub_line in str(text_val).splitlines():
+                    stdout_lines.append(sub_line)
+            elif isinstance(data, str):
+                stdout_lines.append(data)
+    return stdout_lines
 
 
 def cmd_submit_file(args: argparse.Namespace) -> int:

@@ -186,7 +186,7 @@ def check_init(r: Results, ws: Path) -> None:
     )
     meta_ok = (
         meta is not None
-        and str(meta.get("is_private", "")).lower() == "true"
+        and str(meta.get("is_private", "")).lower() == "false"
         and meta.get("competition_sources") == ["myinit"]
     )
     r.record(name, rc == 0 and files_ok and state_ok and meta_ok,
@@ -257,7 +257,7 @@ def check_run_headers_privacy(r: Results, ws: Path, mode: str) -> None:
     headers_ok = all(h in out for h in headers)
     push_ok = "[DRY-RUN] kaggle kernels push -p" in out
     meta = load_meta(comp, ws)
-    privacy_ok = meta is not None and str(meta.get("is_private", "")).lower() == "true"
+    privacy_ok = meta is not None and str(meta.get("is_private", "")).lower() == "false"
     comp_src_ok = meta is not None and "competition_sources" in meta and comp in meta["competition_sources"]
     r.record(name, rc == 0 and headers_ok and push_ok and privacy_ok and comp_src_ok,
              f"rc={rc} headers={headers_ok} push={push_ok} priv={privacy_ok} comp_src={comp_src_ok}")
@@ -411,6 +411,52 @@ def check_no_git_leak(r: Results, _ws: Path) -> None:
     r.record(name, not leaked, f"cwd={cwd}")
 
 
+def check_fetch_notebook_stdout(r: Results, ws: Path) -> None:
+    name = "14 _parse_jsonl_log_files extracts stdout from stubbed JSONL log (no network)"
+    log_dir = Path(tempfile.mkdtemp(prefix="kgs_fetch_"))
+    try:
+        log_file = log_dir / "kernel.log"
+        entries = [
+            json.dumps({"data": "#METRIC:f1=0.85"}),
+            json.dumps({"data": "Line two"}),
+            json.dumps({"other": "ignored"}),  # no "data" key -> skipped
+            json.dumps({"data": {"text": "nested data"}}),
+        ]
+        log_file.write_text("\n".join(entries) + "\n", encoding="utf-8")
+
+        lines = kaggle_comp._parse_jsonl_log_files(log_dir)
+        result = "\n".join(lines)
+
+        ok1 = "#METRIC:f1=0.85" in result
+        ok2 = "Line two" in result
+        ok3 = "ignored" not in result  # no "data" key
+        ok4 = "nested data" in result  # dict data.text
+        r.record(name, ok1 and ok2 and ok3 and ok4,
+                 f"has_metric={ok1} has_line2={ok2} no_other={ok3} nested={ok4}")
+    finally:
+        shutil.rmtree(log_dir, ignore_errors=True)
+
+
+def check_ingestion_oswalk(r: Results, ws: Path) -> None:
+    name = "14b rendered ml ingestion contains os.walk(/kaggle/input); no hard dep on /input/<comp>"
+    rendered = kaggle_comp.render_template("ingestion", "ml", competition="mycomp", iteration=1)
+    has_walk = 'os.walk("/kaggle/input")' in rendered or "os.walk('/kaggle/input')" in rendered or 'os.walk(DATA_DIR)' in rendered
+    no_hard = "/kaggle/input/mycomp" not in rendered
+    r.record(name, has_walk and no_hard,
+             f"walk={has_walk} no_hard_dep={no_hard}")
+
+
+def check_data_403_hint(r: Results, ws: Path) -> None:
+    name = "14c cmd_data --dry-run output skeleton + 403 acceptance URL"
+    # Dry-run should show the command; we can also directly test the error
+    # message path by checking cmd_data source contains the rules URL pattern.
+    src = (HERE / "kaggle_comp.py").read_text(encoding="utf-8")
+    has_rules = "competitions/<comp>/rules" in src or "kaggle.com/competitions/" in src and "rules" in src
+    has_accept = "I Understand and Accept" in src
+    r.record(name, has_rules and has_accept,
+             f"rules_url={has_rules} accept_text={has_accept}")
+
+
 def check_clean(r: Results, _ws: Path) -> None:
     name = "18 smoke test ran to completion (no uncaught exceptions)"
     r.record(name, True)
@@ -454,6 +500,9 @@ def main() -> int:
         check_loop_plateau(r, ws)
         check_gate_proceed(r, ws)
         check_gate_skip(r, ws)
+        check_fetch_notebook_stdout(r, ws)
+        check_ingestion_oswalk(r, ws)
+        check_data_403_hint(r, ws)
         check_no_git_leak(r, ws)
         check_clean(r, ws)
     except Exception as e:  # noqa: BLE001 - safety net

@@ -1,24 +1,34 @@
 # DataIngestion_Node - Generative AI
 # Competition: {{competition}}
-# Purpose: read large text corpora, JSONL instruction datasets, or vector
-# stores from the Kaggle input mount.
+# Purpose: recursively walk /kaggle/input, print what's mounted, and read
+# large text corpora, JSONL instruction datasets, or vector stores.
 import json
 import os
 
-DATA_DIR = "/kaggle/input/{{competition}}"
-print(f"[ingestion] scanning {DATA_DIR}")
+DATA_DIR = "/kaggle/input"
+print(f"[ingestion] walking {DATA_DIR} (competition: {{competition}})")
 
 records = []
-if os.path.isdir(DATA_DIR):
-    for fname in sorted(os.listdir(DATA_DIR)):
-        fpath = os.path.join(DATA_DIR, fname)
+
+# Walk recursively and print every file found, then load JSONL / TXT files.
+for root, dirs, files in os.walk(DATA_DIR):
+    for fname in sorted(files):
+        fpath = os.path.join(root, fname)
+        print(f"[ingestion]   found: {fpath}")
         if fname.endswith(".jsonl"):
-            with open(fpath, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if line:
-                        records.append(json.loads(line))
+            try:
+                with open(fpath, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if line:
+                            records.append(json.loads(line))
+            except Exception as exc:
+                print(f"[ingestion]   SKIP {fname}: {exc}")
         elif fname.endswith(".txt"):
-            with open(fpath, "r", encoding="utf-8") as f:
-                records.append({"prompt": "", "response": f.read()})
+            try:
+                with open(fpath, "r", encoding="utf-8") as f:
+                    records.append({"prompt": "", "response": f.read()})
+            except Exception as exc:
+                print(f"[ingestion]   SKIP {fname}: {exc}")
+
 print(f"[ingestion] loaded {len(records)} records")

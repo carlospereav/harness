@@ -1,17 +1,57 @@
 # Evaluation_Node - Traditional ML
 # Purpose: compute the local success metric that drives best_local_score.
-from sklearn.metrics import f1_score
+# Uses macro-averaged F1 (handles multiclass targets gracefully) and emits
+# #METRIC:f1=<float> — the harness parser matches state.primary_metric.
+from sklearn.metrics import f1_score, accuracy_score
+from sklearn.preprocessing import LabelEncoder
+import numpy as np
 
 score = 0.0
+metric_name = "f1"  # default; the harness uses state.primary_metric
+
 if train_df is not None and "model" in dir() and model is not None:
-    feature_cols = [c for c in train_df.columns if not c.startswith("target")]
-    target_cols = [c for c in train_df.columns if c.startswith("target")]
-    if target_cols:
-        X = train_df[feature_cols]
-        y = train_df[target_cols[0]]
+    # Determine target column using the same logic as experimentation.
+    target_col = None
+    for col in train_df.columns:
+        col_lower = col.lower()
+        if col_lower == "target" or col_lower.startswith("target_"):
+            target_col = col
+            break
+    if target_col is None:
+        target_col = train_df.columns[-1]
+
+    y_raw = train_df[target_col]
+
+    # Encode categorical targets if needed.
+    le = None
+    if y_raw.dtype == object or y_raw.dtype.name == "category":
+        le = LabelEncoder()
+        y = le.fit_transform(y_raw.astype(str))
+    else:
+        y = y_raw
+
+    n_classes = len(np.unique(y))
+    if n_classes > 2:
+        avg = "macro"
+    else:
+        avg = "binary"
+
+    feature_cols = [c for c in train_df.columns
+                    if c != target_col and c.lower() not in ("id",)]
+    X = train_df[feature_cols]
+
+    try:
         preds = model.predict(X)
-        score = float(f1_score(y, preds, average="binary"))
+        score = float(f1_score(y, preds, average=avg))
+    except Exception as exc:
+        print(f"[evaluation] f1_score failed ({exc}), falling back to accuracy")
+        try:
+            score = float(accuracy_score(y, preds))
+            metric_name = "accuracy"
+        except Exception:
+            score = 0.0
+
 # The PRIMARY metric marker. The harness parser keys on state.primary_metric
 # (default "f1" for ML). Direction (minimize) is set in competition_state.json.
-print(f"#METRIC:f1={score:.4f}")
+print(f"#METRIC:{metric_name}={score:.4f}")
 print("[evaluation] local metric computed; feeding best_local_score")
