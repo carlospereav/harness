@@ -246,7 +246,7 @@ def check_metric_parser(r: Results, _ws: Path) -> None:
 
 
 def check_run_headers_privacy(r: Results, ws: Path, mode: str) -> None:
-    name = f"09 run --mode {mode} --dry-run walks 5 nodes -> dry-run push + privacy"
+    name = f"09 run --mode {mode} --dry-run walks 5 nodes -> dry-run push + privacy + hint"
     comp = f"run{mode}"
     run_helper(["init", comp, "--mode", mode, "--submission", "notebook"], ws)
     rc, out, _ = run_helper(
@@ -256,11 +256,12 @@ def check_run_headers_privacy(r: Results, ws: Path, mode: str) -> None:
               "Experimentation_Node", "Evaluation_Node", "DeploymentSync_Node"]
     headers_ok = all(h in out for h in headers)
     push_ok = "[DRY-RUN] kaggle kernels push -p" in out
+    hint_ok = "Submit to Competition" in out and "score NO aparecera" in out
     meta = load_meta(comp, ws)
     privacy_ok = meta is not None and str(meta.get("is_private", "")).lower() == "false"
     comp_src_ok = meta is not None and "competition_sources" in meta and comp in meta["competition_sources"]
-    r.record(name, rc == 0 and headers_ok and push_ok and privacy_ok and comp_src_ok,
-             f"rc={rc} headers={headers_ok} push={push_ok} priv={privacy_ok} comp_src={comp_src_ok}")
+    r.record(name, rc == 0 and headers_ok and push_ok and hint_ok and privacy_ok and comp_src_ok,
+             f"rc={rc} headers={headers_ok} push={push_ok} hint={hint_ok} priv={privacy_ok} comp_src={comp_src_ok}")
 
 
 def check_submit_routing(r: Results, ws: Path) -> None:
@@ -448,13 +449,55 @@ def check_ingestion_oswalk(r: Results, ws: Path) -> None:
 
 def check_data_403_hint(r: Results, ws: Path) -> None:
     name = "14c cmd_data --dry-run output skeleton + 403 acceptance URL"
-    # Dry-run should show the command; we can also directly test the error
-    # message path by checking cmd_data source contains the rules URL pattern.
     src = (HERE / "kaggle_comp.py").read_text(encoding="utf-8")
     has_rules = "competitions/<comp>/rules" in src or "kaggle.com/competitions/" in src and "rules" in src
     has_accept = "I Understand and Accept" in src
     r.record(name, has_rules and has_accept,
              f"rules_url={has_rules} accept_text={has_accept}")
+
+
+def check_push_notebook_hint(r: Results, ws: Path) -> None:
+    name = "14d push-notebook --dry-run prints 'Submit to Competition' hint"
+    run_helper(["init", "hintnb"], ws)
+    rc, out, _ = run_helper(["push-notebook", "hintnb", "--dry-run"], ws)
+    has_url = "https://www.kaggle.com/code/" in out
+    has_hint = "Submit to Competition" in out
+    has_score_hint = "score NO aparecera" in out
+    r.record(name, rc == 0 and has_url and has_hint and has_score_hint,
+             f"rc={rc} url={has_url} hint={has_hint} score_msg={has_score_hint}")
+
+
+def check_notebook_submitted_flag(r: Results, ws: Path) -> None:
+    name = "14e state --show contains notebook_submitted; --notebook-submitted toggles it"
+    run_helper(["init", "nbsubflag"], ws)
+    rc1, out1, _ = run_helper(["state", "nbsubflag", "--show"], ws)
+    try:
+        j1 = json.loads(out1)
+    except Exception:
+        r.record(name, False, "json decode failed")
+        return
+    has_key = "notebook_submitted" in j1
+    is_false = j1.get("notebook_submitted") is False
+    # Toggle to true
+    rc2, out2, _ = run_helper(["state", "nbsubflag", "--notebook-submitted", "true"], ws)
+    rc3, out3, _ = run_helper(["state", "nbsubflag", "--show"], ws)
+    try:
+        j3 = json.loads(out3)
+    except Exception:
+        r.record(name, False, "json decode failed after toggle")
+        return
+    is_true = j3.get("notebook_submitted") is True
+    r.record(name, has_key and is_false and rc2 == 0 and is_true,
+             f"has_key={has_key} default_false={is_false} toggle_rc={rc2} now_true={is_true}")
+
+
+def check_status_file_submission_note(r: Results, ws: Path) -> None:
+    name = "14f cmd_status source contains file-vs-notebook submission guidance"
+    src = (HERE / "kaggle_comp.py").read_text(encoding="utf-8")
+    has_note = "no vinculada al notebook" in src or "NO vinculada al notebook" in src
+    has_csv_check = ".csv" in src and "submission" in src.lower()
+    r.record(name, has_note and has_csv_check,
+             f"guidance_note={has_note} csv_detection={has_csv_check}")
 
 
 def check_clean(r: Results, _ws: Path) -> None:
@@ -503,6 +546,9 @@ def main() -> int:
         check_fetch_notebook_stdout(r, ws)
         check_ingestion_oswalk(r, ws)
         check_data_403_hint(r, ws)
+        check_push_notebook_hint(r, ws)
+        check_notebook_submitted_flag(r, ws)
+        check_status_file_submission_note(r, ws)
         check_no_git_leak(r, ws)
         check_clean(r, ws)
     except Exception as e:  # noqa: BLE001 - safety net

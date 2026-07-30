@@ -467,7 +467,19 @@ def cmd_push(args: argparse.Namespace) -> int:
             kid = meta.get("id", args.slug)
         except Exception:
             kid = args.slug
+            meta = {}
         print(f"  pushed: https://www.kaggle.com/code/{kid}")
+        # If this notebook is attached to a competition, remind the user
+        # that the score won't appear on the Code tab until they click
+        # "Submit to Competition" from the kernel page.
+        comp_sources = meta.get("competition_sources") or []
+        if comp_sources:
+            print()
+            print(f"  [hint] el score NO aparecera bajo el notebook hasta que la submission")
+            print(f"         se origine desde el. Abre https://www.kaggle.com/code/{kid}")
+            print(f"         y pulsa 'Submit to Competition' para {', '.join(comp_sources)}")
+            print(f"         (consume 1 de tu cupo diario).")
+            print()
     return rc
 
 

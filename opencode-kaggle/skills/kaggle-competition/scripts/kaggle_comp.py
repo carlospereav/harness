@@ -21,7 +21,7 @@ Usage:
     kaggle_comp.py data <comp> [--to DIR] [--file F] [--dry-run]
     kaggle_comp.py detect <comp> [--mode ml|genai] [--from F] [--dry-run]
     kaggle_comp.py render <comp> <node> [--mode ml|genai] [--to F]
-    kaggle_comp.py state <comp> [--show] [--update-metric NAME=VAL]
+    kaggle_comp.py state <comp> [--show] [--update-metric NAME=VAL] [--notebook-submitted true|false]
     kaggle_comp.py run <comp> [--mode ml|genai] [--submission auto|file|notebook] \\
                    [--from F] [--max-iters N] [--plateau-patience P] \\
                    [--simulate improve|constant|degrade] [--dry-run]
@@ -133,6 +133,7 @@ def default_state(comp: str, ai_mode: str = "ml",
         "metric_gate": "improve",
         "metric_threshold": None,
         "last_stdout": "",
+        "notebook_submitted": False,  # becomes True after user clicks "Submit to Competition"
     }
 
 
@@ -353,6 +354,26 @@ def _submit_file(comp: str, file_path: str, message: str,
     )
 
 
+def _print_submit_to_competition_hint(comp: str, d: Path) -> None:
+    """After a notebook push, warn that the score won't appear on the Code tab
+    until the user clicks 'Submit to Competition' from the kernel page."""
+    try:
+        meta = kaggle_nb.read_metadata(d)
+        kid = meta.get("id", comp)
+    except Exception:
+        kid = comp
+    if "/" not in kid:
+        user = kaggle_nb._resolve_kaggle_username()
+        if user:
+            kid = f"{user}/{kid}"
+    url = f"https://www.kaggle.com/code/{kid}"
+    print()
+    print("  [hint] el score NO aparecera bajo el notebook hasta que la submission")
+    print(f"         se origine desde el. Abre {url}")
+    print("         y pulsa 'Submit to Competition' (consume 1 de tu cupo diario).")
+    print()
+
+
 # --------------------------------------------------------------------------- #
 # Commands
 # --------------------------------------------------------------------------- #
@@ -494,6 +515,17 @@ def cmd_state(args: argparse.Namespace) -> int:
     if state is None:
         print(f"  no state for {args.comp}; run `init {args.comp}` first")
         return 1
+    if args.notebook_submitted is not None:
+        val = str(args.notebook_submitted).lower()
+        if val in ("true", "1", "yes"):
+            state["notebook_submitted"] = True
+        elif val in ("false", "0", "no"):
+            state["notebook_submitted"] = False
+        else:
+            print(f"  [error] --notebook-submitted expects true/false, got: {args.notebook_submitted!r}")
+            return 1
+        save_state(args.comp, state, args.workspace)
+        print(f"  notebook_submitted = {state['notebook_submitted']}")
     if args.update_metric:
         if "=" not in args.update_metric:
             print("  [error] --update-metric expects NAME=VAL")
@@ -622,7 +654,14 @@ def cmd_run(args: argparse.Namespace) -> int:
                 print("  [DeploymentSync] file submission mode requires --from <file>")
                 return 1
             return _submit_file(comp, args.from_file, args.message, args.dry_run)
-        return _kaggle_push(comp, d, args.dry_run)
+        # Notebook submission: push the kernel to Kaggle.
+        rc = _kaggle_push(comp, d, args.dry_run)
+        if rc == 0:
+            # In regular competitions, a kernel push does NOT create a submission
+            # linked to the notebook. The user must click "Submit to Competition"
+            # from the kernel page for the score to appear on the Code tab.
+            _print_submit_to_competition_hint(comp, d)
+        return rc
     print("  [DeploymentSync] SKIPPED: no improvement over baseline "
           "(submission gate not passed); no push/submit performed.")
     return 0
@@ -749,7 +788,13 @@ def cmd_submit_file(args: argparse.Namespace) -> int:
 
 def cmd_push_notebook(args: argparse.Namespace) -> int:
     d = comp_root(args.comp, args.workspace)
-    return _kaggle_push(args.comp, d, args.dry_run)
+    rc = _kaggle_push(args.comp, d, args.dry_run)
+    if rc == 0:
+        # Hint: in regular competitions, a kernel push does NOT create
+        # a submission tied to the notebook — the user must click
+        # "Submit to Competition" from the kernel page.
+        _print_submit_to_competition_hint(args.comp, d)
+    return rc
 
 
 def cmd_submit(args: argparse.Namespace) -> int:
@@ -766,13 +811,46 @@ def cmd_submit(args: argparse.Namespace) -> int:
     code_py = d / kaggle_nb.CODE_PY
     if code_py.exists():
         kaggle_nb.set_notebook_code(d, code_py.read_text(encoding="utf-8"))
-    return _kaggle_push(args.comp, d, args.dry_run)
+    rc = _kaggle_push(args.comp, d, args.dry_run)
+    if rc == 0:
+        _print_submit_to_competition_hint(args.comp, d)
+    return rc
 
 
 def cmd_status(args: argparse.Namespace) -> int:
     kaggle_nb.validate_slug(args.comp)
-    return kaggle_nb._run(["kaggle", "competitions", "status", args.comp],
-                          dry_run=args.dry_run)
+    rc = kaggle_nb._run(["kaggle", "competitions", "status", args.comp],
+                         dry_run=args.dry_run)
+    if args.dry_run:
+        # Also show the submission-list command we would run for file-vs-notebook detection.
+        print("[DRY-RUN] kaggle competitions submissions " + args.comp)
+        print("  [hint] Para detectar si la submission es de archivo o notebook,")
+        print("         ejecuta: kaggle competitions submissions " + args.comp)
+        print("         Si la submission mas reciente es submission.csv o un zip,")
+        print("         NO esta vinculada al notebook y el score no aparecera en Code.")
+    else:
+        # Heuristic: parse submissions list for file-vs-notebook indicators.
+        import subprocess as _sp
+        try:
+            proc = _sp.run(
+                ["kaggle", "competitions", "submissions", args.comp],
+                capture_output=True, text=True, encoding="utf-8", timeout=30,
+            )
+            combined = (proc.stdout or "") + (proc.stderr or "")
+            is_file_submission = (
+                ".csv" in combined or ".zip" in combined or "submission" in combined.lower()
+            )
+            if is_file_submission:
+                print()
+                print("  [status] La submission mas reciente parece ser un archivo (.csv/.zip),")
+                print("           NO vinculada al notebook. El score SI cuenta para el")
+                print("           leaderboard, pero NO aparecera bajo el notebook en la")
+                print("           pestana Code hasta que pulses 'Submit to Competition'")
+                print("           desde la pagina del kernel.")
+                print()
+        except Exception:
+            pass  # best-effort; the main status command already ran
+    return rc
 
 
 def cmd_leaderboard(args: argparse.Namespace) -> int:
@@ -849,6 +927,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("comp")
     sp.add_argument("--show", action="store_true", help="print the state as JSON")
     sp.add_argument("--update-metric", default=None, help="NAME=VAL to apply through the gate")
+    sp.add_argument("--notebook-submitted", default=None, metavar="true|false",
+                    help="mark the notebook submission as manually completed")
     sp.set_defaults(func=cmd_state)
 
     sp = sub.add_parser("run", help="drive the 5-node pipeline (+ optional optimization loop)")
