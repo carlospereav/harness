@@ -19,6 +19,7 @@ Usage:
                    [--mode ml|genai] [--submission auto|file|notebook] \\
                    [--max-iters N] [--force]
     kaggle_comp.py data <comp> [--to DIR] [--file F] [--dry-run]
+    kaggle_comp.py context <comp> [--top N] [--list-only] [--dry-run]
     kaggle_comp.py detect <comp> [--mode ml|genai] [--from F] [--dry-run]
     kaggle_comp.py render <comp> <node> [--mode ml|genai] [--to F]
     kaggle_comp.py state <comp> [--show] [--update-metric NAME=VAL] [--notebook-submitted true|false]
@@ -40,6 +41,8 @@ Environment (same as kaggle-notebook):
 from __future__ import annotations
 
 import argparse
+import csv
+import io
 import json
 import os
 import re
@@ -88,6 +91,11 @@ DEFAULT_PRIMARY_METRIC = {
 _METRIC_RE = re.compile(
     r"#METRIC:([A-Za-z0-9_]+)=(-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)"
 )
+MAX_CONTEXT_NOTEBOOK_BYTES = 10 * 1024 * 1024
+MAX_CONTEXT_DIGEST_BYTES = 5 * 1024 * 1024
+MAX_CONTEXT_TOTAL_SECONDS = 600
+MAX_CONTEXT_TOTAL_BYTES = 50 * 1024 * 1024
+MAX_CONTEXT_TOTAL_FILES = 500
 
 
 # --------------------------------------------------------------------------- #
@@ -485,6 +493,242 @@ def cmd_data(args: argparse.Namespace) -> int:
             print("          then re-run this command.")
         return proc.returncode
     return 0
+
+
+# --------------------------------------------------------------------------- #
+# Public notebook context
+# --------------------------------------------------------------------------- #
+def _context_dir(comp: str, workspace: str | None = None) -> Path:
+    return comp_root(comp, workspace) / "context"
+
+
+def _context_dirname(ref: str) -> str:
+    """Return a safe workspace name for an ``owner/slug`` kernel reference."""
+    owner, slug = kaggle_nb._split_owner_slug(ref)
+    return f"{owner}__{slug}"
+
+
+def _safe_metadata(value: str) -> str:
+    """Keep untrusted display metadata on one harmless comment line."""
+    value = re.sub(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))", "", str(value))
+    value = re.sub(r"[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]", " ", value)
+    return " ".join(value.split())
+
+
+def _safe_source(text: str) -> str:
+    """Redact common credential assignments before persisting public code."""
+    text = re.sub(
+        r"(?i)((?:api[_-]?key|token|secret|password)\s*[:=]\s*[\"'])[^\"']+([\"'])",
+        r"\1[REDACTED]\2",
+        text,
+    )
+    text = re.sub(r"(?i)\b(?:bearer\s+|ghp_|sk-|AKIA)[A-Za-z0-9_./+=-]{12,}", "[REDACTED]", text)
+    text = re.sub(r"(?i)\b(?:github_pat_|AIza|xox[baprs]-)[A-Za-z0-9_./+=-]{12,}", "[REDACTED]", text)
+    text = re.sub(r"(?im)\b(?:KAGGLE_KEY|CLIENT_SECRET|CLIENTSECRET)\s*[:=]\s*[^\s,#]+",
+                  "[REDACTED]", text)
+    text = re.sub(r"-----BEGIN [^-]+ PRIVATE KEY-----[\s\S]*?-----END [^-]+ PRIVATE KEY-----",
+                  "[REDACTED PRIVATE KEY]", text)
+    return text
+
+
+def _parse_kernel_list_csv(text: str) -> list[dict[str, str]]:
+    """Parse CSV output from ``kaggle kernels list --csv``."""
+    lines = [line for line in (text or "").splitlines() if line.strip()]
+    if not lines or any(line.strip().lower() == "not found" for line in lines):
+        return []
+    rows = list(csv.reader(io.StringIO("\n".join(
+        line for line in lines if not line.startswith("Next Page Token =")
+    ))))
+    if not rows:
+        return []
+    header_index = next(
+        (i for i, row in enumerate(rows) if row and row[0].strip() == "ref"),
+        None,
+    )
+    header = ([cell.strip() for cell in rows[header_index]]
+              if header_index is not None
+              else ["ref", "title", "author", "lastRunTime", "totalVotes"])
+    data_rows = rows[header_index + 1:] if header_index is not None else rows
+    kernels: list[dict[str, str]] = []
+    for row in data_rows:
+        if not row or "/" not in row[0].strip():
+            continue
+        record = dict(zip(header, row))
+        record.setdefault("ref", row[0].strip())
+        kernels.append(record)
+    return kernels
+
+
+def _extract_notebook_digest(ipynb_path: Path, *, ref: str = "",
+                             title: str = "", votes: str = "") -> str:
+    """Convert a pulled notebook into a readable, valid-Python context digest."""
+    notebook = json.loads(ipynb_path.read_text(encoding="utf-8"))
+    lines = [f"# context digest: {ref}" if ref else "# context digest"]
+    if title:
+        lines.append(f"# title: {_safe_metadata(title)}")
+    if votes:
+        lines.append(f"# votes: {_safe_metadata(votes)}")
+    if ref:
+        lines.append(f"# source: https://www.kaggle.com/code/{ref}")
+    for cell in notebook.get("cells", []):
+        source = cell.get("source", [])
+        text = "".join(source) if isinstance(source, list) else str(source)
+        if not text.strip():
+            continue
+        lines.extend(["", "# %%"])
+        if cell.get("cell_type") == "markdown":
+            lines.extend("#" if not line else f"# {line}"
+                         for line in text.rstrip("\n").splitlines())
+        else:
+            # Pulled public notebooks are untrusted. Keep their source readable
+            # in the digest, but make the digest non-executable by commenting it.
+            lines.extend("# " + line if line else "#"
+                         for line in _safe_source(text).rstrip("\n").splitlines())
+    return "\n".join(lines) + "\n"
+
+
+def _find_pulled_source(directory: Path) -> Path | None:
+    notebooks = sorted(directory.glob("*.ipynb"))
+    if notebooks:
+        return notebooks[0]
+    scripts = sorted(directory.glob("*.py")) + sorted(directory.glob("*.r"))
+    return scripts[0] if scripts else None
+
+
+def cmd_context(args: argparse.Namespace) -> int:
+    kaggle_nb.validate_slug(args.comp)
+    if args.top < 1 or args.top > 100:
+        print("  [error] --top must be between 1 and 100")
+        return 1
+    list_cmd = ["kaggle", "kernels", "list", "--competition", args.comp,
+                "--sort-by", "voteCount", "--page-size", str(args.top), "--csv"]
+    if args.dry_run:
+        kaggle_nb._run(list_cmd, dry_run=True)
+        if not args.list_only:
+            print(f"[DRY-RUN] kaggle kernels pull <owner>/<slug> -p "
+                  f"{_context_dir(args.comp, args.workspace)}")
+            print("  [dry-run] actual refs are discovered from the ranking at runtime")
+        return 0
+    if not kaggle_nb._kaggle_available():
+        print("  [error] kaggle CLI not found; run kaggle_nb.py setup first")
+        return 1
+
+    import subprocess as _sp
+    print("$ " + " ".join(list_cmd))
+    proc = _sp.run(list_cmd, capture_output=True, text=True, encoding="utf-8", timeout=60)
+    if proc.returncode != 0:
+        print(_safe_metadata(proc.stdout or ""))
+        if proc.stderr:
+            print(_safe_metadata(proc.stderr), file=sys.stderr)
+        return proc.returncode
+    kernels = _parse_kernel_list_csv(proc.stdout)[:args.top]
+    if not kernels:
+        print(f"  no public kernels found for competition {args.comp!r}")
+        return 1
+    print(f"== top {len(kernels)} public notebooks for {args.comp} (by votes) ==")
+    for index, kernel in enumerate(kernels, 1):
+        print(f"  {index:2d}. {_safe_metadata(kernel.get('ref', ''))} "
+              f"(votes={_safe_metadata(kernel.get('totalVotes', '?'))}) "
+              f"{_safe_metadata(kernel.get('title', ''))[:70]}")
+    if args.list_only:
+        return 0
+
+    context = _context_dir(args.comp, args.workspace)
+    workspace_root = comp_root(args.comp, args.workspace).resolve()
+    if any((parent / ".git").exists() for parent in (workspace_root, *workspace_root.parents)):
+        print(f"  [error] context workspace must be outside a git repository: {workspace_root}")
+        return 1
+    if context.exists() and context.is_symlink():
+        print(f"  [error] unsafe context directory: {context}")
+        return 1
+    if not context.parent.resolve().is_relative_to(workspace_root):
+        print(f"  [error] unsafe context directory: {context}")
+        return 1
+    context.mkdir(parents=True, exist_ok=True)
+    deadline = time.monotonic() + MAX_CONTEXT_TOTAL_SECONDS
+    digest_count = 0
+    total_bytes = 0
+    total_files = 0
+    for kernel in kernels:
+        ref = kernel.get("ref", "")
+        try:
+            dirname = _context_dirname(ref)
+        except ValueError as exc:
+            print(f"  [skip] invalid kernel ref {ref!r}: {exc}")
+            continue
+        pull_dir = context / dirname
+        if pull_dir.exists() and pull_dir.is_symlink():
+            print(f"  [skip] refusing symlinked pull directory: {pull_dir}")
+            continue
+        pull_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            remaining = max(1, int(deadline - time.monotonic()))
+            if remaining <= 0:
+                print("  [warn] context pull time budget exhausted")
+                break
+            print("$ " + " ".join(["kaggle", "kernels", "pull", ref, "-p", str(pull_dir)]))
+            pull_proc = _sp.run(
+                ["kaggle", "kernels", "pull", ref, "-p", str(pull_dir)],
+                check=False, capture_output=True, text=True, encoding="utf-8",
+                errors="replace", timeout=min(120, remaining),
+            )
+            rc = pull_proc.returncode
+            if pull_proc.stdout:
+                print(_safe_metadata(pull_proc.stdout))
+            if pull_proc.stderr:
+                print(_safe_metadata(pull_proc.stderr))
+        except _sp.TimeoutExpired:
+            print(f"  [warn] pull timed out for {ref}; skipping")
+            continue
+        if rc != 0:
+            print(f"  [warn] pull failed for {ref} (rc={rc}); skipping")
+            continue
+        source = _find_pulled_source(pull_dir)
+        if source is None:
+            print(f"  [warn] no notebook or script found after pulling {ref}; skipping")
+            continue
+        try:
+            resolved_source = source.resolve()
+            if source.is_symlink() or not resolved_source.is_relative_to(workspace_root):
+                print(f"  [skip] refusing unsafe pulled source: {source}")
+                continue
+            if source.stat().st_size > MAX_CONTEXT_NOTEBOOK_BYTES:
+                print(f"  [skip] pulled source exceeds {MAX_CONTEXT_NOTEBOOK_BYTES} bytes: {source}")
+                continue
+            pulled_files = [p for p in pull_dir.rglob("*") if p.is_file()]
+            pulled_bytes = sum(p.stat().st_size for p in pulled_files)
+            if (total_bytes + pulled_bytes > MAX_CONTEXT_TOTAL_BYTES
+                    or total_files + len(pulled_files) > MAX_CONTEXT_TOTAL_FILES):
+                print("  [warn] context download budget exhausted; skipping remaining digest")
+                break
+            total_bytes += pulled_bytes
+            total_files += len(pulled_files)
+        except OSError:
+            print(f"  [skip] cannot validate pulled source: {source}")
+            continue
+        if source.suffix.lower() == ".ipynb":
+            digest = _extract_notebook_digest(
+                source, ref=ref, title=kernel.get("title", ""),
+                votes=kernel.get("totalVotes", ""),
+            )
+        else:
+            source_lines = _safe_source(source.read_text(encoding="utf-8")).rstrip("\n").splitlines()
+            safe_source = "\n".join("# " + line if line else "#" for line in source_lines)
+            digest = (f"# context digest: {ref}\n"
+                      f"# source: https://www.kaggle.com/code/{ref}\n\n"
+                      f"# %%\n{safe_source}\n")
+        digest_path = context / f"{dirname}.py"
+        if digest_path.is_symlink():
+            print(f"  [skip] refusing symlinked digest path: {digest_path}")
+            continue
+        if len(digest.encode("utf-8")) > MAX_CONTEXT_DIGEST_BYTES:
+            print(f"  [skip] digest exceeds {MAX_CONTEXT_DIGEST_BYTES} bytes: {digest_path}")
+            continue
+        digest_path.write_text(digest, encoding="utf-8")
+        digest_count += 1
+        print(f"  [digest] {ref} -> {digest_path}")
+    print(f"  read {digest_count} digest(s) under {context} before writing code.py")
+    return 0 if digest_count else 1
 
 
 def cmd_detect(args: argparse.Namespace) -> int:
@@ -912,6 +1156,15 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--file")
     add_dry_run(sp)
     sp.set_defaults(func=cmd_data)
+
+    sp = sub.add_parser("context", help="read top-voted public notebooks for context")
+    sp.add_argument("comp")
+    sp.add_argument("--top", type=int, default=5,
+                    help="number of notebooks to list/pull (1-100; default 5)")
+    sp.add_argument("--list-only", action="store_true",
+                    help="list the ranking without pulling notebooks")
+    add_dry_run(sp)
+    sp.set_defaults(func=cmd_context)
 
     sp = sub.add_parser("detect", help="detect submission mode + ai_mode, write to state")
     sp.add_argument("comp")

@@ -119,7 +119,7 @@ def check_helper_syntax(r: Results) -> None:
 def check_help(r: Results, _ws: Path) -> None:
     name = "02 --help lists every subcommand"
     proc = subprocess.run([PY, str(HELPER), "--help"], capture_output=True, text=True)
-    expected = ["setup", "list", "files", "init", "data", "detect", "render",
+    expected = ["setup", "list", "files", "init", "data", "context", "detect", "render",
                 "state", "run", "submit-file", "push-notebook", "submit",
                 "status", "leaderboard"]
     ok_help = proc.returncode == 0 and all(e in proc.stdout for e in expected)
@@ -316,6 +316,74 @@ def check_remote_cmds_dryrun(r: Results, ws: Path) -> None:
     lb_ok = "[DRY-RUN] kaggle competitions leaderboard" in o5
     r.record(name, all([f_ok, d_ok, l_ok, s_ok, lb_ok]),
              f"files={f_ok} data={d_ok} list={l_ok} status={s_ok} lb={lb_ok}")
+
+
+def check_context_dry_run(r: Results, ws: Path) -> None:
+    name = "19a context --dry-run prints ranked kernel list and pull plan"
+    run_helper(["init", "ctx1"], ws)
+    rc, out, _ = run_helper(["context", "ctx1", "--top", "3", "--dry-run"], ws)
+    list_ok = "[DRY-RUN] kaggle kernels list --competition ctx1 --sort-by voteCount --page-size 3 --csv" in out
+    pull_ok = "[DRY-RUN] kaggle kernels pull <owner>/<slug>" in out
+    r.record(name, rc == 0 and list_ok and pull_ok,
+             f"rc={rc} list={list_ok} pull={pull_ok}")
+
+
+def check_context_csv_parser(r: Results, _ws: Path) -> None:
+    name = "19b context CSV parser handles noise, quoted titles, and empty results"
+    sample = (
+        "Next Page Token = abc\n"
+        "ref,title,author,lastRunTime,totalVotes\n"
+        'alice/eda,"EDA, with tricks",alice,2026-07-01,120\n'
+        "bob/starter,Simple starter,bob,2026-06-30,95\n"
+    )
+    kernels = kaggle_comp._parse_kernel_list_csv(sample)
+    parsed = (len(kernels) == 2 and kernels[0]["ref"] == "alice/eda"
+              and kernels[0]["title"] == "EDA, with tricks")
+    empty = (kaggle_comp._parse_kernel_list_csv("Not found\n") == []
+             and kaggle_comp._parse_kernel_list_csv("") == [])
+    r.record(name, parsed and empty, f"parsed={parsed} empty={empty}")
+
+
+def check_context_digest(r: Results, _ws: Path) -> None:
+    name = "19c notebook digest preserves markdown, code cells, and valid Python"
+    directory = Path(tempfile.mkdtemp(prefix="kgs_context_"))
+    try:
+        notebook = {
+            "cells": [
+                {"cell_type": "markdown", "source": ["# Intro\n", "Some text"]},
+                {"cell_type": "code", "source": ["import pandas as pd\n", "x = 1"]},
+                {"cell_type": "code", "source": ["print(x)"]},
+            ]
+        }
+        path = directory / "kernel.ipynb"
+        path.write_text(json.dumps(notebook), encoding="utf-8")
+        digest = kaggle_comp._extract_notebook_digest(
+            path, ref="alice/eda", title="EDA", votes="12"
+        )
+        ast.parse(digest)
+        checks = [
+            digest.count("# %%") == 3,
+            "# Some text" in digest,
+            "import pandas as pd" in digest,
+            "# source: https://www.kaggle.com/code/alice/eda" in digest,
+        ]
+        r.record(name, all(checks), f"checks={checks}")
+    except Exception as exc:  # noqa: BLE001 - report as a smoke failure
+        r.record(name, False, str(exc))
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
+
+
+def check_context_traversal(r: Results, ws: Path) -> None:
+    name = "19d context rejects traversal competition and kernel references"
+    rc, _, _ = run_helper(["context", "..", "--dry-run"], ws)
+    bad_ref_rejected = False
+    try:
+        kaggle_comp._context_dirname("a/../../x")
+    except ValueError:
+        bad_ref_rejected = True
+    r.record(name, rc != 0 and bad_ref_rejected,
+             f"bad_comp={rc != 0} bad_ref={bad_ref_rejected}")
 
 
 def check_path_traversal(r: Results, ws: Path) -> None:
@@ -587,6 +655,10 @@ def main() -> int:
         check_submit_routing(r, ws)
         check_detect(r, ws)
         check_remote_cmds_dryrun(r, ws)
+        check_context_dry_run(r, ws)
+        check_context_csv_parser(r, ws)
+        check_context_digest(r, ws)
+        check_context_traversal(r, ws)
         check_path_traversal(r, ws)
         check_render_validation(r, ws)
         check_loop_maxiters(r, ws)

@@ -190,6 +190,7 @@ kaggle_comp.py list [pattern] [--dry-run]
 kaggle_comp.py files <comp> [--dry-run]
 kaggle_comp.py init <comp> [--title T] [--gpu] [--internet] [--mode ml|genai] [--submission auto|file|notebook] [--max-iters N] [--force]
 kaggle_comp.py data <comp> [--to DIR] [--file F] [--dry-run]
+kaggle_comp.py context <comp> [--top N] [--list-only] [--dry-run]
 kaggle_comp.py detect <comp> [--mode ml|genai] [--from F] [--dry-run]
 kaggle_comp.py render <comp> <node> [--mode ml|genai] [--to F]
 kaggle_comp.py state <comp> [--show] [--update-metric NAME=VAL]
@@ -215,6 +216,7 @@ Competition workspace layout (all OUTSIDE any git repo):
 ├── notebook.ipynb               # private notebook (is_private=true)
 ├── kernel-metadata.json         # competition_sources=[<comp>]
 ├── code.py                      # editable mirror (single source of truth)
+├── context/                     # top-voted public notebook digests
 └── data/                        # downloaded competition data
 ```
 
@@ -232,12 +234,19 @@ When the user asks to participate in a Kaggle competition:
    ```powershell
    python opencode-kaggle\skills\kaggle-competition\scripts\kaggle_comp.py init <comp> --mode ml --submission notebook --gpu --internet
    ```
-3. **(Optional) detect / fetch data:**
+3. **Read top-voted public notebooks for context before writing `code.py`:**
+   ```powershell
+   python ...\kaggle_comp.py context <comp> --top 5
+   ```
+   This ranks public kernels by votes, pulls them into the workspace, and writes
+   readable `.py` digests under `competitions/<comp>/context/`. Review these for
+   schema discoveries, validation strategy, and modeling ideas before coding.
+4. **(Optional) detect / fetch data:**
    ```powershell
    python ...\kaggle_comp.py detect <comp>
    python ...\kaggle_comp.py data <comp>
    ```
-4. **Run the pipeline** (single-pass to produce a first submission):
+5. **Run the pipeline** (single-pass to produce a first submission):
    ```powershell
    python ...\kaggle_comp.py run <comp> --mode ml --submission notebook
    ```
@@ -245,17 +254,17 @@ When the user asks to participate in a Kaggle competition:
    ```powershell
    python ...\kaggle_comp.py run <comp> --mode genai --max-iters 5 --simulate improve
    ```
-5. **Push / submit explicitly** if needed:
+6. **Push / submit explicitly** if needed:
    ```powershell
    python ...\kaggle_comp.py submit <comp> --mode notebook
    python ...\kaggle_comp.py submit <comp> --mode file --from submission.csv -m "v1"
    ```
-6. **Status / leaderboard:**
+7. **Status / leaderboard:**
    ```powershell
    python ...\kaggle_comp.py status <comp>
    python ...\kaggle_comp.py leaderboard <comp>
    ```
-7. Use `--dry-run` to validate any push/submit without hitting the Kaggle API.
+8. Use `--dry-run` to validate any push/submit without hitting the Kaggle API.
 
 The agent is expected to **edit `code.py` in the workspace between iterations**
 to improve the model; the harness re-injects it into the notebook on push.
