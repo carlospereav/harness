@@ -112,6 +112,23 @@ string targets. Feature columns exclude `id`-like columns.
 `#METRIC:` marker uses the actual metric name (defaults to `"accuracy"` if F1
 fails). Target column detection matches the experimentation template.
 
+## Cell segregation (2026-07-30)
+
+The competition harness now uses **percent-format** ``# %%`` delimiters in
+``code.py`` so each pipeline node renders as its own notebook cell on Kaggle.
+Previously the entire ``code.py`` was dumped into a single code cell, making
+notebooks hard to read and debug. Key changes:
+
+- ``kaggle_comp._append_code`` prepends ``# %%`` before each node's rendered
+  code. ``code.py`` remains a single editable flat file.
+- ``kaggle_nb.set_notebook_code`` splits on ``# %%`` lines into separate cells;
+  markers are stripped from the published notebook. ``# %% [markdown]`` segments
+  become markdown cells (future-proof for narrative).
+- **Backward-compatible**: no ``# %%`` → single cell (verbatim source, existing
+  ``write-code`` / ``push`` unchanged).
+- Smoke tests: ``check_write_code_splits_on_percent`` (kaggle-nb) and
+  ``check_notebook_cells_segregated`` (kaggle-comp).
+
 ## Local user context (machine-specific; do not hardcode upstream)
 - Kaggle username: `carlospereavega`. Use it only when prompting/pushing on
   this machine, never as a literal in committed upstream code.

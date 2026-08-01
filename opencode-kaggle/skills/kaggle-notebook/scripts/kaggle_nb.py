@@ -46,7 +46,7 @@ _SLUG_RE = re.compile(r"[A-Za-z0-9_.-]+")
 NBFORMAT_AVAILABLE = False
 try:
     import nbformat  # type: ignore
-    from nbformat.v4 import new_code_cell, new_notebook  # type: ignore
+    from nbformat.v4 import new_code_cell, new_markdown_cell, new_notebook  # type: ignore
 
     NBFORMAT_AVAILABLE = True
 except ImportError:  # pragma: no cover - handled at runtime
@@ -301,20 +301,140 @@ def save_notebook(d: Path, nb) -> None:
     print(f"  wrote {path}")
 
 
+# --------------------------------------------------------------------------- #
+# Percent-format cell splitting (# %% convention, compatible with VS Code /
+# PyCharm / jupytext). When code.py contains ``# %%`` delimiters, the notebook
+# gets one cell per segment.  When no delimiters exist, the whole code.py is
+# a single code cell (**backward compatible** with scratch notebooks).
+# --------------------------------------------------------------------------- #
+
+# Matches ``# %%`` or ``#%%` `` at the start of a line (whitespace-tolerant).
+_CELL_DELIM_RE = re.compile(r"^[ \t]*#[ \t]*%%", re.MULTILINE)
+
+# ``# %% [markdown]`` (case-insensitive) — the segment becomes a markdown cell.
+_MD_RE = re.compile(r"^[ \t]*#[ \t]*%%[ \t]*\[markdown\]", re.IGNORECASE)
+
+
+def _is_comment_only(text: str) -> bool:
+    """Return True when every non-blank line starts with ``#``."""
+    return all(
+        not s or s.startswith("#")
+        for ln in text.splitlines()
+        for s in (ln.strip(),)
+    )
+
+
+def split_code_into_cells(code: str) -> list[tuple[str, str]]:
+    """Split Python source on ``# %%`` percent-format cell delimiters.
+
+    Returns a list of ``(cell_type, body)`` where *cell_type* is ``"code"`` or
+    ``"markdown"`` and *body* is the cell source (trailing ``\\n`` guaranteed).
+
+    Rules (consistent with the percent-format convention):
+
+    * If no ``# %%`` delimiter exists anywhere in *code*, the whole string is
+      returned as a single ``("code", code)`` cell — **backward-compatible**
+      with scratch notebooks that predate this feature.
+    * Preamble (content before the first ``# %%`` line) is **dropped** when it
+      is whitespace-only or **comment-only** (the ``code.py`` file header).
+      Preamble containing real Python code is kept as a code cell — so the
+      agent can add setup / imports at the top without them being silently
+      dropped.
+    * Each ``# %%`` segment is a code cell.  The marker line itself is stripped;
+      the cell body starts with the node's own header comment (e.g.
+      ``# DataIngestion_Node - Traditional ML``).
+    * ``# %% [markdown]`` segments become **markdown** cells.  Leading ``# ``
+      comment markers on each line are stripped so the notebook renders plain
+      Markdown text.
+    * Empty / whitespace-only segments are skipped.
+    """
+    if not code or not code.strip():
+        return []
+
+    # Fast path: no percent-format delimiters → single code cell, source verbatim.
+    if not _CELL_DELIM_RE.search(code):
+        return [("code", code)]
+
+    lines = code.splitlines(keepends=True)
+    starts = [i for i, ln in enumerate(lines) if _CELL_DELIM_RE.match(ln)]
+
+    cells: list[tuple[str, str]] = []
+
+    # -- preamble --------------------------------------------------------------
+    if starts[0] > 0:
+        preamble = "".join(lines[:starts[0]])
+        if preamble.strip() and not _is_comment_only(preamble):
+            cells.append(("code", preamble.rstrip("\n") + "\n"))
+
+    # -- cells after each delimiter --------------------------------------------
+    bounds = starts + [len(lines)]
+    for k, start in enumerate(starts):
+        # body = everything after the ``# %%`` marker line through the next
+        # delimiter (or EOF).
+        seg = lines[start + 1:bounds[k + 1]]
+        is_md = bool(_MD_RE.match(lines[start]))
+
+        if is_md:
+            # Strip leading ``# `` / ``#`` from each line so the notebook
+            # renders clean Markdown (percent-format convention).
+            md_lines: list[str] = []
+            for ln in seg:
+                stripped = ln.lstrip(" \t")
+                if stripped.startswith("#"):
+                    s2 = stripped[1:]  # drop '#' (and optionally a space)
+                    if s2.startswith(" "):
+                        s2 = s2[1:]
+                    md_lines.append(s2)
+                else:
+                    md_lines.append(ln)
+            body = "".join(md_lines)
+        else:
+            body = "".join(seg)
+
+        body = body.strip("\n")
+        if not body.strip():
+            continue
+        cell_type = "markdown" if is_md else "code"
+        cells.append((cell_type, body + "\n"))
+
+    return cells
+
+
 def set_notebook_code(d: Path, code: str) -> None:
-    """Replace ALL code cells with a single cell containing ``code``."""
+    """Replace all code cells with cell(s) derived from *code*.
+
+    Splits *code* on ``# %%`` percent-format delimiters into separate code
+    (and optional markdown) cells, one per segment.  When no delimiters are
+    present, the whole *code* becomes a single code cell (**backward-compatible**
+    with scratch notebooks that use the ``write-code`` or ``push`` commands).
+
+    Existing **non-code** cells (e.g. hand-edited narrative markdown) are
+    preserved in their original position; only code cells are replaced.
+    """
     nb = load_notebook(d)
+    new_cells = split_code_into_cells(code)
+    new_nb_cells = [
+        new_markdown_cell(src) if ctype == "markdown" else new_code_cell(src)
+        for ctype, src in new_cells
+    ]
+
     code_cells = [c for c in nb.cells if c.cell_type == "code"]
-    new = new_code_cell(code)
-    if code_cells:
-        first = code_cells[0]
-        idx = nb.cells.index(first)
-        # remove existing code cells
-        for c in code_cells[1:]:
-            nb.cells.remove(c)
-        nb.cells[idx] = new
+
+    if new_nb_cells:
+        if code_cells:
+            first = code_cells[0]
+            idx = nb.cells.index(first)
+            for c in code_cells:
+                nb.cells.remove(c)
+            for off, nc in enumerate(new_nb_cells):
+                nb.cells.insert(idx + off, nc)
+        else:
+            nb.cells.extend(new_nb_cells)
     else:
-        nb.cells.append(new)
+        # code is empty → drop all code cells, leave other cells alone
+        for c in code_cells:
+            nb.cells.remove(c)
+
     save_notebook(d, nb)
 
 

@@ -149,6 +149,36 @@ competitions (where the notebook is the submission and Kaggle scores it).
 
 ---
 
+## Cell segregation
+
+The competition harness uses the **percent-format** cell delimiter convention
+(`# %%`) inside ``code.py`` so that each pipeline node renders as its **own
+notebook cell** on Kaggle:
+
+- ``_append_code`` prepends a ``# %%`` marker before every node's rendered
+  code. The assembled ``code.py`` stays a single editable flat file (the source
+  of truth) while the markers tell the injection layer where to split.
+- On push, ``kaggle_nb.set_notebook_code`` splits the flat ``code.py`` on
+  ``# %%`` lines into separate code cells.  The marker lines themselves are
+  **stripped** from the published notebook — cells start with the node's own
+  header comment (e.g. ``# DataIngestion_Node - Traditional ML``).
+- A ``# %% [markdown]`` marker (optional) produces a **markdown cell** — useful
+  for narrative or instructions between pipeline steps.  Leading ``# `` comment
+  prefixes are stripped so the notebook renders clean Markdown.
+- The file header in ``code.py`` (``# code.py - competition ...``) is a
+  comment-only preamble and is **not** rendered as a cell, keeping the
+  notebook clean.  Any non-comment code before the first ``# %%`` is preserved
+  as a cell, so the agent can safely add imports/setup at the top.
+- When no ``# %%`` marker exists anywhere in ``code.py``, the whole file is a
+  single code cell (**backward-compatible** with scratch notebooks and the
+  ``write-code`` / ``push`` commands in ``kaggle-notebook``).
+
+This means every run of ``/competition`` produces a **well-segregated, readable
+notebook** — one cell per pipeline node, with each iteration's
+experimentation/evaluation pair in its own cell.
+
+---
+
 ## Helper CLI
 
 Location: `opencode-kaggle/skills/kaggle-competition/scripts/kaggle_comp.py`

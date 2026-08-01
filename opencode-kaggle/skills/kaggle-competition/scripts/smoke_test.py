@@ -500,6 +500,56 @@ def check_status_file_submission_note(r: Results, ws: Path) -> None:
              f"guidance_note={has_note} csv_detection={has_csv_check}")
 
 
+def check_notebook_cells_segregated(r: Results, ws: Path) -> None:
+    name = "14g run --dry-run produces segregated notebook cells (# %% in code.py, multi-cell ipynb)"
+    comp = "cellseg"
+    run_helper(["init", comp], ws)
+    rc, out, _ = run_helper(["run", comp, "--dry-run"], ws)
+
+    # Check code.py contains # %% delimiters
+    code_py = ws / "competitions" / comp / "code.py"
+    code_text = code_py.read_text(encoding="utf-8") if code_py.exists() else ""
+    delims_present = "# %%" in code_text
+
+    # Load the assembled notebook and inspect its cells
+    nb_path = ws / "competitions" / comp / "notebook.ipynb"
+    nb = None
+    if nb_path.exists():
+        nb = json.loads(nb_path.read_text(encoding="utf-8"))
+
+    if nb is None:
+        r.record(name, False, "notebook not found")
+        return
+
+    all_cells = nb.get("cells", [])
+    code_cells = [c for c in all_cells if c.get("cell_type") == "code"]
+
+    cells_ok = len(code_cells) >= 5  # ingestion, processing, exp, eval, deployment
+
+    first_cell = "".join(code_cells[0].get("source", [])) if code_cells else ""
+    ingestion_header_ok = "# DataIngestion_Node" in first_cell
+
+    # No cell should have "# %%" (delimiter stripped on injection)
+    markers_stripped_ok = all(
+        "# %%" not in "".join(c.get("source", []))
+        for c in code_cells
+    )
+
+    # The file header (# code.py - competition ..) must NOT appear in any cell
+    header_in_cell = any(
+        "code.py - competition" in "".join(c.get("source", []))
+        for c in all_cells
+    )
+    preamble_dropped_ok = not header_in_cell
+
+    r.record(name,
+             rc == 0 and delims_present and cells_ok and ingestion_header_ok
+             and markers_stripped_ok and preamble_dropped_ok,
+             f"rc={rc} delims={delims_present} cells={len(code_cells)} "
+             f"ing={ingestion_header_ok} markers={markers_stripped_ok} "
+             f"preamble={preamble_dropped_ok}")
+
+
 def check_clean(r: Results, _ws: Path) -> None:
     name = "18 smoke test ran to completion (no uncaught exceptions)"
     r.record(name, True)
@@ -549,6 +599,7 @@ def main() -> int:
         check_push_notebook_hint(r, ws)
         check_notebook_submitted_flag(r, ws)
         check_status_file_submission_note(r, ws)
+        check_notebook_cells_segregated(r, ws)
         check_no_git_leak(r, ws)
         check_clean(r, ws)
     except Exception as e:  # noqa: BLE001 - safety net

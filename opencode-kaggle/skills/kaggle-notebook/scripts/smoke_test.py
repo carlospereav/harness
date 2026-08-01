@@ -152,6 +152,79 @@ def check_write_code(r: Results, ws: Path, d: Path) -> str:
     return code
 
 
+def check_write_code_splits_on_percent(r: Results, ws: Path) -> None:
+    name = "05b write-code splits on # %% -> multiple cells (markdown + code), markers stripped"
+    slug = "demo-split"
+    d = ws / slug
+    rc_new, _, _ = run_helper(
+        ["new", slug, "--title", "Split test"], ws,
+    )
+    nb_path = d / "notebook.ipynb"
+    src = ws / "split_code.py"
+    code = (
+        "# preamble header comment\n"
+        "# %%\n"
+        "# Cell A - code\n"
+        "print('hello a')\n"
+        "\n"
+        "# %% [markdown]\n"
+        "# ## Markdown cell title\n"
+        "# Some narrative text.\n"
+        "\n"
+        "# %%\n"
+        "# Cell B - code\n"
+        "print('hello b')\n"
+    )
+    src.write_text(code, encoding="utf-8")
+    rc, _, _ = run_helper(["write-code", slug, "--from", str(src)], ws)
+    nb = load_ipynb(nb_path) if nb_path.exists() else None
+
+    if nb is None:
+        r.record(name, False, "notebook not found")
+        return
+
+    all_cells = nb.get("cells", [])
+    cells = [c for c in all_cells if c.get("cell_type") in ("code", "markdown")]
+
+    # Expect: 1 code cell (Cell A), 1 markdown cell, 1 code cell (Cell B) = 3.
+    cells_ok = len(cells) == 3
+    types_ok = (
+        cells_ok
+        and cells[0].get("cell_type") == "code"
+        and cells[1].get("cell_type") == "markdown"
+        and cells[2].get("cell_type") == "code"
+    )
+    # Preamble (comment-only) must be absent.
+    preamble_in = "preamble" in "".join(
+        "".join(c.get("source", [])) for c in cells
+    )
+    preamble_ok = not preamble_in
+    # Code cell A content: starts with "# Cell A - code" (no "# %%" marker)
+    ca = "".join(cells[0].get("source", []))
+    a_ok = "# Cell A - code" in ca and "# %%" not in ca
+    # Markdown cell: "# " stripped -> "## Markdown cell title... Some narrative..."
+    cm = "".join(cells[1].get("source", []))
+    md_ok = (
+        "## Markdown cell title" in cm
+        and "Some narrative text" in cm
+        # "## " is a heading; bare "# " at line start (comment prefix) must be gone
+        and not any(
+            ln.strip().startswith("# ") and not ln.strip().startswith("## ")
+            for ln in cm.splitlines()
+            if ln.strip()
+        )
+    )
+    # Code cell B: starts with "# Cell B - code" (no "# %%")
+    cb = "".join(cells[2].get("source", []))
+    b_ok = "# Cell B - code" in cb and "# %%" not in cb
+
+    detail = (
+        f"rc={rc} cells={len(cells)} types={types_ok} "
+        f"preamble_dropped={preamble_ok} a={a_ok} md={md_ok} b={b_ok}"
+    )
+    r.record(name, cells_ok and types_ok and preamble_ok and a_ok and md_ok and b_ok, detail)
+
+
 def check_append_code(r: Results, ws: Path, d: Path) -> None:
     name = "06 append-code adds a second code cell"
     src = ws / "extra.py"
@@ -255,6 +328,7 @@ def main() -> int:
         check_setup(r, ws)
         d = check_new(r, ws)
         check_write_code(r, ws, d)
+        check_write_code_splits_on_percent(r, ws)
         check_append_code(r, ws, d)
         check_push_dryrun(r, ws)
         check_traversal(r, ws)

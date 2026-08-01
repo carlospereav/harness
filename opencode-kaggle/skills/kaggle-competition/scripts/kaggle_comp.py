@@ -304,21 +304,27 @@ def render_template(node: str, mode: str, *, competition: str = "",
             .replace("{{iteration}}", str(iteration)))
 
 
-def _append_code(d: Path, code: str) -> None:
+def _append_code(d: Path, code: str, *, cell: bool = False) -> None:
+    """Append *code* to the workspace ``code.py``, optionally prefacing it with a
+    ``# %%`` percent-format cell delimiter so each node becomes its own notebook
+    cell when the harness injects ``code.py`` via ``set_notebook_code``."""
     code_py = d / kaggle_nb.CODE_PY
+    prefix = "# %%\n" if cell else ""
     if code_py.exists():
-        code_py.write_text(code_py.read_text(encoding="utf-8").rstrip() + "\n\n" + code + "\n",
-                           encoding="utf-8")
+        code_py.write_text(
+            code_py.read_text(encoding="utf-8").rstrip() + "\n\n" + prefix + code + "\n",
+            encoding="utf-8",
+        )
     else:
-        code_py.write_text(code + "\n", encoding="utf-8")
+        code_py.write_text(prefix + code + "\n", encoding="utf-8")
 
 
 def _run_node(comp: str, node: str, mode: str, d: Path, state: dict,
               workspace: str | None, *, iteration: int = 1) -> None:
-    """Render a node template, append it to code.py, advance the state."""
+    """Render a node template, append it to code.py as its own cell, advance the state."""
     print(f"== {NODE_DISPLAY[node]} ==")
     code = render_template(node, mode, competition=comp, iteration=iteration)
-    _append_code(d, code)
+    _append_code(d, code, cell=True)
     print(f"  [render] {node} -> {kaggle_nb.CODE_PY} (mode={mode}, iter={iteration})")
     state["current_node"] = node
     save_state(comp, state, workspace)

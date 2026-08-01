@@ -83,6 +83,13 @@ When the user asks to create or edit a Kaggle notebook:
    Never write the notebook contents into the git repo — always under the
    workspace.
 
+   You can use the **percent-format** cell delimiter ``# %%`` inside ``code.py``
+   to produce multiple notebook cells on push.  Each ``# %%`` segment becomes
+   its own code cell (the marker line is stripped).  ``# %% [markdown]`` segments
+   become markdown cells (comment prefixes ``# `` are stripped).  When no
+   ``# %%`` markers are present, the whole ``code.py`` is a single code cell
+   as before — fully backward-compatible.
+
 3. **Push.** Inject `code.py` into the notebook and upload it privately:
    ```powershell
    python opencode-kaggle\skills\kaggle-notebook\scripts\kaggle_nb.py push <slug>
