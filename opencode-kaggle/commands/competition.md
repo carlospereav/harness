@@ -16,6 +16,15 @@ Evaluation -> DeploymentSync). Generate Python that prints a
 Never commit notebook code or credentials to git. Use `--dry-run` to validate
 push/submit commands without hitting the Kaggle API.
 
+Before implementation, follow the plan phase: investigate the competition,
+run `plan <comp>`, fill `plan.md`, present the plan to the user, and **WAIT for
+explicit approval**. The user may switch models while waiting. After approval,
+record it with `plan <comp> --approve` and run the pipeline with
+`run <comp> --require-plan`; do not edit `code.py` or run implementation before
+that approval. Once `plan.md` exists, an unapproved or changed plan blocks even
+plain `run`; use `--allow-unplanned` only for an explicit legacy-recovery
+bypass.
+
 Competition workspace (notebook code, state, data) lives OUTSIDE any git repo
 under `$KAGGLE_WORKSPACE/competitions/<comp>/` (default
 `~/kaggle-workspace/competitions/`).

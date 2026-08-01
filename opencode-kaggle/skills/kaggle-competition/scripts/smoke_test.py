@@ -257,9 +257,10 @@ def check_init(r: Results, ws: Path) -> None:
     files_ok = nb.exists() and code.exists()
     state_ok = state is not None and all(
         k in state for k in ("competition", "submission_mode", "ai_mode",
-                             "current_node", "primary_metric", "minimize",
-                             "best_local_score", "iterations", "max_iterations",
-                             "history")
+                              "current_node", "plan_created", "primary_metric", "minimize",
+                              "best_local_score", "iterations", "max_iterations",
+                              "history", "plan_approved", "approved_plan_sha256",
+                              "approved_plan_config")
     )
     meta_ok = (
         meta is not None
@@ -268,6 +269,109 @@ def check_init(r: Results, ws: Path) -> None:
     )
     r.record(name, rc == 0 and files_ok and state_ok and meta_ok,
              f"rc={rc} files={files_ok} state={state_ok} meta={meta_ok}")
+
+
+def check_plan_scaffold(r: Results, ws: Path) -> None:
+    name = "20a plan scaffolds plan.md, is idempotent, and resets approval on --force"
+    comp = "planscaffold"
+    run_helper(["init", comp, "--mode", "ml"], ws)
+    plan_path = ws / "competitions" / comp / "plan.md"
+
+    first_rc, _, _ = run_helper(["plan", comp], ws)
+    first_text = plan_path.read_text(encoding="utf-8") if plan_path.exists() else ""
+    first_state = load_state(comp, ws)
+    scaffold_ok = (
+        first_rc == 0
+        and plan_path.exists()
+        and f"# Competition plan: {comp}" in first_text
+        and "## Approach" in first_text
+        and "## Acceptance criteria" in first_text
+        and "Primary metric: `f1`" in first_text
+        and first_state is not None
+        and first_state.get("plan_approved") is False
+    )
+
+    approve_rc, _, _ = run_helper(["plan", comp, "--approve"], ws)
+    approved_state = load_state(comp, ws)
+    (plan_path).write_text(first_text + "\nSENTINEL\n", encoding="utf-8")
+    repeat_rc, _, _ = run_helper(["plan", comp], ws)
+    preserved = plan_path.read_text(encoding="utf-8")
+    force_rc, _, _ = run_helper(["plan", comp, "--force"], ws)
+    final_text = plan_path.read_text(encoding="utf-8") if plan_path.exists() else ""
+    final_state = load_state(comp, ws)
+    approval_ok = (
+        approve_rc == 0
+        and approved_state is not None
+        and approved_state.get("plan_approved") is True
+        and bool(approved_state.get("approved_plan_sha256"))
+        and isinstance(approved_state.get("approved_plan_config"), dict)
+    )
+    idempotent_ok = repeat_rc != 0 and "SENTINEL" in preserved
+    reset_ok = force_rc == 0 and "SENTINEL" not in final_text and final_state is not None and final_state.get("plan_approved") is False
+    r.record(name, scaffold_ok and approval_ok and idempotent_ok and reset_ok,
+             f"scaffold={scaffold_ok} approve={approval_ok} idempotent={idempotent_ok} reset={reset_ok}")
+
+
+def check_plan_approve_gate(r: Results, ws: Path) -> None:
+    name = "20b plan approval persists and --require-plan gates run"
+    comp = "plangate"
+    run_helper(["init", comp, "--mode", "ml"], ws)
+
+    blocked_rc, blocked_out, _ = run_helper(
+        ["run", comp, "--require-plan", "--dry-run"], ws
+    )
+    blocked_ok = blocked_rc != 0 and "plan gate active" in blocked_out
+    approve_missing_rc, _, _ = run_helper(["plan", comp, "--approve"], ws)
+    scaffold_rc, _, _ = run_helper(["plan", comp], ws)
+    plain_blocked_rc, plain_blocked_out, _ = run_helper(["run", comp, "--dry-run"], ws)
+    show_rc, show_out, _ = run_helper(["plan", comp, "--show"], ws)
+    approve_rc, _, _ = run_helper(["plan", comp, "--approve"], ws)
+    state = load_state(comp, ws)
+    allowed_rc, allowed_out, _ = run_helper(
+        ["run", comp, "--require-plan", "--dry-run"], ws
+    )
+    allowed_ok = (
+        allowed_rc == 0
+        and "approved plan" in allowed_out
+        and "DataIngestion_Node" in allowed_out
+        and "DeploymentSync_Node" in allowed_out
+    )
+    show_ok = show_rc == 0 and f"# Competition plan: {comp}" in show_out
+    persisted_ok = approve_rc == 0 and state is not None and state.get("plan_approved") is True
+    plain_blocked_ok = plain_blocked_rc != 0 and "plan gate active" in plain_blocked_out
+
+    plan_path = ws / "competitions" / comp / "plan.md"
+    plan_path.unlink()
+    deleted_rc, deleted_out, _ = run_helper(["run", comp, "--dry-run"], ws)
+    recreate_rc, _, _ = run_helper(["plan", comp, "--force"], ws)
+    reapprove_delete_rc, _, _ = run_helper(["plan", comp, "--approve"], ws)
+    plan_path.write_text(plan_path.read_text(encoding="utf-8") + "\npost-approval edit\n", encoding="utf-8")
+    changed_rc, changed_out, _ = run_helper(
+        ["run", comp, "--require-plan", "--dry-run"], ws
+    )
+    reapprove_rc, _, _ = run_helper(["plan", comp, "--approve"], ws)
+    config_rc, config_out, _ = run_helper(
+        ["run", comp, "--require-plan", "--max-iters", "2", "--dry-run"], ws
+    )
+    integrity_ok = (
+        deleted_rc != 0
+        and "approved plan.md is missing" in deleted_out
+        and recreate_rc == 0
+        and reapprove_delete_rc == 0
+        and changed_rc != 0
+        and "changed after approval" in changed_out
+        and reapprove_rc == 0
+        and config_rc != 0
+        and "configuration changed" in config_out
+    )
+    r.record(
+        name,
+        blocked_ok and approve_missing_rc != 0 and scaffold_rc == 0 and plain_blocked_ok
+        and show_ok and persisted_ok and allowed_ok and integrity_ok,
+        f"blocked={blocked_ok} missing_approve={approve_missing_rc != 0} scaffold={scaffold_rc == 0} "
+        f"plain_blocked={plain_blocked_ok} show={show_ok} persisted={persisted_ok} "
+        f"allowed={allowed_ok} integrity={integrity_ok}",
+    )
 
 
 def check_state_show(r: Results, ws: Path) -> None:
@@ -777,6 +881,8 @@ def main() -> int:
         check_templates_and_render(r, ws)
         check_ml_template_quality(r, ws)
         check_init(r, ws)
+        check_plan_scaffold(r, ws)
+        check_plan_approve_gate(r, ws)
         check_state_show(r, ws)
         check_state_update_metric(r, ws)
         check_metric_parser(r, ws)

@@ -18,6 +18,7 @@ Usage:
     kaggle_comp.py init <comp> [--title T] [--gpu] [--internet] \\
                    [--mode ml|genai] [--submission auto|file|notebook] \\
                    [--max-iters N] [--force]
+    kaggle_comp.py plan <comp> [--show|--approve] [--force]
     kaggle_comp.py data <comp> [--to DIR] [--file F] [--dry-run]
     kaggle_comp.py context <comp> [--top N] [--list-only] [--dry-run]
     kaggle_comp.py detect <comp> [--mode ml|genai] [--from F] [--dry-run]
@@ -25,7 +26,7 @@ Usage:
     kaggle_comp.py state <comp> [--show] [--update-metric NAME=VAL] [--notebook-submitted true|false]
     kaggle_comp.py run <comp> [--mode ml|genai] [--submission auto|file|notebook] \\
                    [--from F] [--max-iters N] [--plateau-patience P] \\
-                   [--simulate improve|constant|degrade] [--dry-run]
+                   [--simulate improve|constant|degrade] [--require-plan|--allow-unplanned] [--dry-run]
     kaggle_comp.py submit-file <comp> --from <file> -m "msg" [--dry-run]
     kaggle_comp.py push-notebook <comp> [--dry-run]
     kaggle_comp.py submit <comp> [--mode auto|file|notebook] [--from F] \\
@@ -42,10 +43,12 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import io
 import json
 import os
 import re
+import stat
 import sys
 import time
 import tempfile
@@ -70,6 +73,15 @@ import kaggle_nb  # type: ignore  # noqa: E402  (connectivity reuse)
 # --------------------------------------------------------------------------- #
 COMP_SUBDIR = "competitions"
 STATE_FILE = "competition_state.json"
+PLAN_FILE = "plan.md"
+PLAN_CONFIG_KEYS = (
+    "ai_mode",
+    "submission_mode",
+    "primary_metric",
+    "minimize",
+    "max_iterations",
+    "plateau_patience",
+)
 
 # Node slugs -> user-facing node names (kept stable for stdout/output checks).
 NODE_DISPLAY = {
@@ -130,6 +142,10 @@ def default_state(comp: str, ai_mode: str = "ml",
         "submission_mode": submission_mode,
         "ai_mode": ai_mode,
         "current_node": "ingestion",
+        "plan_created": False,
+        "plan_approved": False,
+        "approved_plan_sha256": None,
+        "approved_plan_config": None,
         "primary_metric": metric,
         "minimize": minimize,
         "best_local_score": None,
@@ -157,6 +173,64 @@ def save_state(comp: str, state: dict, workspace: str | None = None) -> None:
     p.write_text(json.dumps(state, indent=2, ensure_ascii=False) + "\n",
                  encoding="utf-8")
     print(f"  wrote {p}")
+
+
+def _safe_plan_path(d: Path, workspace_override: str | None = None) -> Path:
+    """Return plan.md only when it resolves inside the canonical workspace."""
+    plan_path = d / PLAN_FILE
+    workspace = kaggle_nb.workspace_root(workspace_override).resolve()
+    expected_comp = workspace / COMP_SUBDIR / d.name
+    expected = expected_comp / PLAN_FILE
+
+    def is_reparse_point(path: Path) -> bool:
+        if path.is_symlink():
+            return True
+        try:
+            attributes = getattr(os.lstat(path), "st_file_attributes", 0)
+        except FileNotFoundError:
+            return False
+        return bool(attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+
+    # The workspace itself may be a user-selected symlink, but the competition
+    # and plan components must not redirect reads/writes outside its canonical
+    # tree through a symlink, junction, or Windows reparse point.
+    for parent in (workspace / COMP_SUBDIR, expected_comp):
+        if is_reparse_point(parent):
+            raise ValueError("competition workspace contains an unsafe reparse point")
+    try:
+        resolved = plan_path.resolve(strict=False)
+    except OSError as exc:
+        raise ValueError(f"cannot resolve plan path: {exc}") from exc
+    if d.resolve() != expected_comp or plan_path.is_symlink() or resolved != expected:
+        raise ValueError("plan.md must not be a symlink or resolve outside the canonical workspace")
+    return plan_path
+
+
+def _plan_sha256(plan_path: Path) -> str:
+    return hashlib.sha256(plan_path.read_bytes()).hexdigest()
+
+
+def _plan_config(state: dict) -> dict:
+    return {key: state.get(key) for key in PLAN_CONFIG_KEYS}
+
+
+def _plan_approval_error(plan_path: Path, state: dict | None,
+                         expected_state: dict | None = None) -> str | None:
+    """Return an approval-integrity error, or None when the plan is approved."""
+    if state is None or not state.get("plan_approved", False):
+        return "no approved plan is recorded"
+    if not plan_path.exists():
+        return "approved plan.md is missing"
+    approved_hash = state.get("approved_plan_sha256")
+    if not approved_hash:
+        return "approval metadata is incomplete; approve the plan again"
+    if approved_hash != _plan_sha256(plan_path):
+        return "plan.md changed after approval; approve the current plan again"
+    approved_config = state.get("approved_plan_config")
+    current_state = expected_state or state
+    if not isinstance(approved_config, dict) or approved_config != _plan_config(current_state):
+        return "implementation configuration changed after approval; approve the plan again"
+    return None
 
 
 # --------------------------------------------------------------------------- #
@@ -458,6 +532,136 @@ def cmd_init(args: argparse.Namespace) -> int:
     )
     print(f"  wrote {d / kaggle_nb.CODE_PY}")
     print("  notebook PRIVATE (is_private=true) — EDA output protected; competition_sources set")
+    return 0
+
+
+def _render_plan(comp: str, state: dict) -> str:
+    """Return the editable plan scaffold for a competition workspace."""
+    mode = state.get("ai_mode", "ml")
+    submission = state.get("submission_mode", "notebook")
+    metric = state.get("primary_metric", DEFAULT_PRIMARY_METRIC.get(mode, ("f1", False))[0])
+    direction = "minimize (lower is better)" if state.get("minimize", False) else "maximize (higher is better)"
+    max_iters = state.get("max_iterations", 1)
+    patience = state.get("plateau_patience", 2)
+    return f"""# Competition plan: {comp}
+
+## Status
+- Approval: pending
+- Plan artifact: `{PLAN_FILE}`
+- This file is the source of truth for the implementation phase.
+
+## Competition context
+- Competition: `{comp}`
+- AI mode: `{mode}`
+- Submission mode: `{submission}`
+- Primary metric: `{metric}` ({direction})
+
+## Data and schema notes
+<!-- Record the discovered files, columns, target, labels, and any data-quality constraints. -->
+- Files and layout:
+- Target / output schema:
+- Important constraints:
+
+## Approach
+### DataIngestion
+<!-- Explain how raw competition inputs will be discovered and loaded. -->
+
+### DataProcessing
+<!-- Explain transformations, feature engineering, and leakage prevention. -->
+
+### Experimentation
+<!-- Specify the model, training strategy, and tunable decisions. -->
+
+### Evaluation
+<!-- Explain validation splits/CV and how `{metric}` will be emitted. -->
+
+### DeploymentSync
+<!-- Specify the final notebook or file submission path and required checks. -->
+
+## Validation and iteration budget
+- Validation strategy:
+- Maximum iterations: `{max_iters}`
+- Plateau patience: `{patience}`
+- Metric direction: `{direction}`
+
+## Acceptance criteria
+<!-- Replace these with concrete YES/NO checks before requesting approval. -->
+- [ ] Data ingestion discovers the required competition inputs without hardcoded assumptions.
+- [ ] Processing and experimentation produce the expected submission inputs.
+- [ ] Evaluation prints `#METRIC:{metric}=<float>` and uses the documented validation strategy.
+- [ ] Deployment preserves private notebook metadata and uses the selected submission mode.
+- [ ] The smoke/dry-run checks for the implementation pass.
+
+## Risks and recovery
+- Risks:
+- Fallback or manual recovery steps:
+
+## Approval
+Approval is recorded separately in `competition_state.json`. After the user
+approves this plan, run:
+
+```text
+kaggle_comp.py plan {comp} --approve
+```
+
+Then implement only this plan with `run {comp} --require-plan`.
+"""
+
+
+def cmd_plan(args: argparse.Namespace) -> int:
+    """Create, display, or approve the persistent competition plan."""
+    d = comp_root(args.comp, args.workspace)
+    plan_path = _safe_plan_path(d, args.workspace)
+
+    if args.force and (args.show or args.approve):
+        print("  [error] --force only applies when creating or replacing the plan")
+        return 1
+
+    if args.show:
+        if not plan_path.exists():
+            print(f"  no plan for {args.comp}; run `plan {args.comp}` first")
+            return 1
+        print(plan_path.read_text(encoding="utf-8"))
+        return 0
+
+    if args.approve:
+        if not plan_path.exists():
+            print(f"  no plan for {args.comp}; run `plan {args.comp}` first")
+            return 1
+        plan_text = plan_path.read_text(encoding="utf-8")
+        required_sections = ("# Competition plan:", "## Approach", "## Acceptance criteria")
+        missing_sections = [section for section in required_sections if section not in plan_text]
+        if missing_sections:
+            print("  [error] plan is missing required sections: " + ", ".join(missing_sections))
+            return 1
+        state = load_state(args.comp, args.workspace)
+        if state is None:
+            state = default_state(args.comp)
+        state["plan_approved"] = True
+        state["plan_created"] = True
+        state["approved_plan_sha256"] = _plan_sha256(plan_path)
+        state["approved_plan_config"] = _plan_config(state)
+        save_state(args.comp, state, args.workspace)
+        print(f"  approved {plan_path}")
+        print(f"  implementation gate enabled with: run {args.comp} --require-plan")
+        return 0
+
+    state = load_state(args.comp, args.workspace)
+    if state is None:
+        state = default_state(args.comp)
+    if plan_path.exists() and not args.force:
+        print(f"  plan already exists at {plan_path} (use --force to replace it)")
+        return 1
+
+    plan_path.write_text(_render_plan(args.comp, state), encoding="utf-8")
+    # A newly created or replaced plan always requires a fresh approval.
+    state["plan_created"] = True
+    state["plan_approved"] = False
+    state["approved_plan_sha256"] = None
+    state["approved_plan_config"] = None
+    save_state(args.comp, state, args.workspace)
+    print(f"  wrote {plan_path}")
+    print(f"  fill it in, present it for approval, then run: plan {args.comp} --approve")
     return 0
 
 
@@ -805,10 +1009,53 @@ def cmd_state(args: argparse.Namespace) -> int:
 def cmd_run(args: argparse.Namespace) -> int:
     comp = args.comp
     d = comp_root(comp, args.workspace)
+    plan_path = _safe_plan_path(d, args.workspace)
     state = load_state(comp, args.workspace)
+
+    # Validate the approved plan against both its exact contents and the
+    # implementation settings that were approved.  CLI overrides are checked
+    # before they are applied to the live state so an approved run cannot be
+    # silently changed by --mode, --submission, or iteration flags.
+    candidate_state = dict(state) if state is not None else None
+    if candidate_state is not None:
+        if args.mode:
+            candidate_state["ai_mode"] = args.mode
+            metric, minimize = DEFAULT_PRIMARY_METRIC.get(args.mode, ("f1", False))
+            candidate_state["primary_metric"] = metric
+            candidate_state["minimize"] = minimize
+        if args.submission != "auto":
+            candidate_state["submission_mode"] = args.submission
+        if args.max_iters is not None:
+            candidate_state["max_iterations"] = args.max_iters
+        if args.plateau_patience is not None:
+            candidate_state["plateau_patience"] = args.plateau_patience
+
+    approval_error = _plan_approval_error(plan_path, state, candidate_state)
+    has_plan = plan_path.exists()
+    tracked_plan = has_plan or bool(
+        state
+        and (
+            state.get("plan_created", False)
+            or state.get("plan_approved", False)
+            or state.get("approved_plan_sha256")
+        )
+    )
+    if args.require_plan:
+        if approval_error:
+            print(f"  [run] plan gate active: {approval_error}")
+            print(f"  [run] Create/fill it with: plan {comp}")
+            print(f"  [run] Approve it with:     plan {comp} --approve")
+            return 1
+        print(f"  [run] approved plan: {plan_path}")
+    elif tracked_plan and approval_error:
+        if not args.allow_unplanned:
+            print(f"  [run] plan gate active: {approval_error}")
+            print(f"  [run] Use: run {comp} --require-plan after approval, or explicitly bypass with --allow-unplanned")
+            return 1
+        print(f"  [run] WARNING: bypassing plan gate (--allow-unplanned): {approval_error}")
     if state is None:
         sub_mode = args.submission if args.submission != "auto" else "notebook"
-        state = default_state(comp, ai_mode=args.mode, submission_mode=sub_mode)
+        state = default_state(comp, ai_mode=args.mode or "ml", submission_mode=sub_mode)
     # apply CLI overrides
     if args.max_iters is not None:
         state["max_iterations"] = args.max_iters
@@ -1151,6 +1398,17 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--force", action="store_true")
     sp.set_defaults(func=cmd_init)
 
+    sp = sub.add_parser("plan", help="create, show, or approve the competition plan")
+    sp.add_argument("comp")
+    plan_action = sp.add_mutually_exclusive_group()
+    plan_action.add_argument("--show", action="store_true",
+                             help="print the existing plan")
+    plan_action.add_argument("--approve", action="store_true",
+                             help="persist approval for the existing plan")
+    sp.add_argument("--force", action="store_true",
+                    help="replace the plan and reset its approval")
+    sp.set_defaults(func=cmd_plan)
+
     sp = sub.add_parser("data", help="download competition data")
     sp.add_argument("comp")
     sp.add_argument("--to")
@@ -1193,7 +1451,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("run", help="drive the 5-node pipeline (+ optional optimization loop)")
     sp.add_argument("comp")
-    sp.add_argument("--mode", choices=["ml", "genai"], default="ml")
+    sp.add_argument("--mode", choices=["ml", "genai"], default=None)
     sp.add_argument("--submission", choices=["auto", "file", "notebook"], default="auto")
     sp.add_argument("--from", dest="from_file", default=None,
                     help="submission file (required for --submission file)")
@@ -1203,6 +1461,11 @@ def build_parser() -> argparse.ArgumentParser:
                     help="consecutive non-improving iters before stop (default 2)")
     sp.add_argument("--simulate", choices=["improve", "constant", "degrade"],
                     default="improve", help="dry-run only: fake metric trajectory")
+    plan_gate = sp.add_mutually_exclusive_group()
+    plan_gate.add_argument("--require-plan", action="store_true",
+                           help="require an approved plan before running")
+    plan_gate.add_argument("--allow-unplanned", action="store_true",
+                           help="explicitly bypass a pending or changed plan")
     sp.add_argument("-m", "--message", default="submission")
     add_dry_run(sp)
     sp.set_defaults(func=cmd_run)

@@ -58,6 +58,38 @@ is duplicated.
 
 ---
 
+## Plan phase (plan -> approve -> implement)
+
+The competition harness follows the same deliberate pause as the generic
+harness: investigate and plan first, **present the plan and wait for explicit
+user approval**, then implement. This lets a heavy model do the competition
+research and lets the user switch to a cheaper model before code is generated.
+
+1. The planning model runs `init`, `context`, and any applicable `detect` or
+   `data` commands to investigate the competition without writing implementation
+   code.
+2. Run `plan <comp>` and fill the generated `plan.md` in the competition
+   workspace. Record the data/schema discoveries, per-node approach, validation
+   strategy, metric direction, iteration budget, risks, and measurable
+   yes/no acceptance criteria.
+3. Present the completed plan to the user and **WAIT**. Do not edit `code.py`
+   or run the pipeline before explicit approval. The user can change models at
+   this point.
+4. After approval, record it with `plan <comp> --approve`. The approval is
+   persisted as `plan_approved: true` in `competition_state.json`, so a fresh
+   model/session can use `plan <comp> --show` to reread the plan.
+5. Implement only the approved plan and use `run <comp> --require-plan`. The
+   command refuses to run until the persisted approval and `plan.md` are both
+   present. Use `plan <comp> --force` when replacing a plan; it resets approval
+   and requires a new approval. Once a plan exists, an unapproved or changed
+   plan also blocks a plain `run`; `--allow-unplanned` is an explicit emergency
+   bypass for legacy recovery.
+
+This plan phase is the Kaggle equivalent of `harness-plan`; the node pipeline
+and metric/submission gates remain the implementation and evaluation stages.
+
+---
+
 ## Metric emission convention (REQUIRED)
 
 For the harness to read Jupyter stdout reliably, generated code MUST print a
@@ -92,6 +124,10 @@ Schema:
   "submission_mode": "file | notebook",
   "ai_mode": "ml | genai",
   "current_node": "ingestion | processing | experimentation | evaluation | deployment",
+  "plan_created": false,
+  "plan_approved": false,
+  "approved_plan_sha256": null,
+  "approved_plan_config": null,
   "primary_metric": "f1",
   "minimize": false,
   "best_local_score": null,
@@ -107,6 +143,11 @@ Schema:
 ```
 
 The state is **resumable**: re-running `run` reloads it and continues.
+`approved_plan_sha256` binds approval to the exact `plan.md` contents, while
+`approved_plan_config` binds it to the mode, submission route, metric, and
+iteration settings that were approved. Editing the plan or changing those
+settings requires re-approval. The lifecycle marker also keeps the gate active
+if an approved or pending `plan.md` is deleted or renamed.
 
 ---
 
@@ -190,12 +231,13 @@ kaggle_comp.py setup
 kaggle_comp.py list [pattern] [--dry-run]
 kaggle_comp.py files <comp> [--dry-run]
 kaggle_comp.py init <comp> [--title T] [--gpu] [--internet] [--mode ml|genai] [--submission auto|file|notebook] [--max-iters N] [--force]
+kaggle_comp.py plan <comp> [--show|--approve] [--force]
 kaggle_comp.py data <comp> [--to DIR] [--file F] [--dry-run]
 kaggle_comp.py context <comp> [--top N] [--list-only] [--dry-run]
 kaggle_comp.py detect <comp> [--mode ml|genai] [--from F] [--dry-run]
 kaggle_comp.py render <comp> <node> [--mode ml|genai] [--to F]
 kaggle_comp.py state <comp> [--show] [--update-metric NAME=VAL]
-kaggle_comp.py run <comp> [--mode ml|genai] [--submission auto|file|notebook] [--from F] [--max-iters N] [--plateau-patience P] [--simulate improve|constant|degrade] [--dry-run]
+kaggle_comp.py run <comp> [--mode ml|genai] [--submission auto|file|notebook] [--from F] [--max-iters N] [--plateau-patience P] [--simulate improve|constant|degrade] [--require-plan|--allow-unplanned] [--dry-run]
 kaggle_comp.py submit-file <comp> --from <file> -m "msg" [--dry-run]
 kaggle_comp.py push-notebook <comp> [--dry-run]
 kaggle_comp.py submit <comp> [--mode auto|file|notebook] [--from F] [-m msg] [--dry-run]
@@ -214,6 +256,7 @@ Competition workspace layout (all OUTSIDE any git repo):
 ```
 ~/kaggle-workspace/competitions/<comp>/
 ├── competition_state.json      # global state (resumable)
+├── plan.md                     # approved implementation plan
 ├── notebook.ipynb               # private notebook (is_private=true)
 ├── kernel-metadata.json         # competition_sources=[<comp>]
 ├── code.py                      # editable mirror (single source of truth)
@@ -239,33 +282,43 @@ When the user asks to participate in a Kaggle competition:
    ```powershell
    python ...\kaggle_comp.py context <comp> --top 5
    ```
-   This ranks public kernels by votes, pulls them into the workspace, and writes
-   readable `.py` digests under `competitions/<comp>/context/`. Review these for
-   schema discoveries, validation strategy, and modeling ideas before coding.
+    This ranks public kernels by votes, pulls them into the workspace, and writes
+    readable `.py` digests under `competitions/<comp>/context/`. Review these for
+    schema discoveries, validation strategy, and modeling ideas before coding.
 4. **(Optional) detect / fetch data:**
+    ```powershell
+    python ...\kaggle_comp.py detect <comp>
+    python ...\kaggle_comp.py data <comp>
+    ```
+5. **Plan, present, and wait for approval before implementation:**
+    ```powershell
+    python ...\kaggle_comp.py plan <comp>
+    # Fill in plan.md, present it, and STOP until the user explicitly approves.
+    # After approval, continue in the implementation model:
+    python ...\kaggle_comp.py plan <comp> --approve
+    ```
+   The planning model may stop after presenting `plan.md`; switch to the
+   implementation model, reread it with `plan <comp> --show`, and continue only
+   after the user approves it.
+6. **Run the approved pipeline** (single-pass to produce a first submission):
    ```powershell
-   python ...\kaggle_comp.py detect <comp>
-   python ...\kaggle_comp.py data <comp>
-   ```
-5. **Run the pipeline** (single-pass to produce a first submission):
-   ```powershell
-   python ...\kaggle_comp.py run <comp> --mode ml --submission notebook
+   python ...\kaggle_comp.py run <comp> --mode ml --submission notebook --require-plan
    ```
    Or an optimization loop (offline-safe with `--dry-run`):
    ```powershell
-   python ...\kaggle_comp.py run <comp> --mode genai --max-iters 5 --simulate improve
+   python ...\kaggle_comp.py run <comp> --mode genai --max-iters 5 --simulate improve --require-plan
    ```
-6. **Push / submit explicitly** if needed:
+7. **Push / submit explicitly** if needed:
    ```powershell
    python ...\kaggle_comp.py submit <comp> --mode notebook
    python ...\kaggle_comp.py submit <comp> --mode file --from submission.csv -m "v1"
    ```
-7. **Status / leaderboard:**
+8. **Status / leaderboard:**
    ```powershell
    python ...\kaggle_comp.py status <comp>
    python ...\kaggle_comp.py leaderboard <comp>
    ```
-8. Use `--dry-run` to validate any push/submit without hitting the Kaggle API.
+9. Use `--dry-run` to validate any push/submit without hitting the Kaggle API.
 
 The agent is expected to **edit `code.py` in the workspace between iterations**
 to improve the model; the harness re-injects it into the notebook on push.
@@ -307,8 +360,12 @@ to improve the model; the harness re-injects it into the notebook on push.
 | `--max-iters N` (run)     | 1 = single-pass deploy; >1 = optimization loop               |
 | `--plateau-patience P`    | Consecutive non-improving iters before stop (default 2)      |
 | `--simulate ...` (run)    | Dry-run only: fake metric trajectory (improve/constant/degrade) |
+| `--require-plan` (run)    | Refuse implementation until the plan has been approved      |
+| `--allow-unplanned` (run) | Explicit emergency bypass for a pending/changed plan       |
+| `--show` (plan)           | Print the persistent plan for a fresh model/session          |
+| `--approve` (plan)        | Persist explicit user approval for the plan                  |
 | `--dry-run` (push/submit) | Print the kaggle command without executing it                 |
-| `--force` (init)          | Overwrite an existing scaffold                               |
+| `--force` (init/plan)     | Overwrite a scaffold; plan replacement resets approval       |
 
 Use `--dry-run` whenever you want to validate a command without hitting the
 Kaggle API (e.g. during evaluation without credentials).
