@@ -1,78 +1,284 @@
-# Experimentation_Node - Traditional ML (optimization loop, iteration {{iteration}})
-# Purpose: train algorithms, tune hyperparameters, read stdout to evaluate.
-# Uses HistGradientBoostingClassifier which handles categoricals and NaN
-# natively — no manual encoding/imputation required.
-from sklearn.ensemble import HistGradientBoostingClassifier
-from sklearn.model_selection import cross_val_score
-from sklearn.preprocessing import LabelEncoder
-import numpy as np
+# %% [markdown]
+# ## Model objective and target decision
+#
+# This iteration first records how the label was selected and which columns are
+# excluded.  The fallback to the final training column is explicit because
+# competition schemas do not always name their target consistently.
 
-# NOTE: the agent rewrites this cell each iteration based on Evaluation_Node
-# feedback. The metric emitted here is an intermediate training signal; the
-# PRIMARY metric is emitted by Evaluation_Node.
+# %%
+import re
+
+import numpy as np
+import pandas as pd
+from sklearn.compose import ColumnTransformer
+from sklearn.ensemble import HistGradientBoostingClassifier
+from sklearn.impute import SimpleImputer
+from sklearn.model_selection import KFold, StratifiedKFold, StratifiedShuffleSplit, cross_val_score
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import LabelEncoder, OrdinalEncoder
+
+
 model = None
 train_loss = 1.0
-if train_df is not None:
-    # Determine target column: look for 'target' in column names, or use the last column.
-    target_col = None
-    for col in train_df.columns:
-        col_lower = col.lower()
-        if col_lower == "target" or col_lower.startswith("target_"):
-            target_col = col
-            break
-    if target_col is None:
-        target_col = train_df.columns[-1]
+cv_scores = np.array([])
+prior_target_col = globals().get("target_col")
+MAX_TRAIN_ROWS = 250_000
+MAX_MODEL_FEATURES = 200
+target_col = None
+model_feature_cols = []
+feature_cols = []
+decision_log = []
+y = None
+X = None
+n_classes = 0
 
-    y_raw = train_df[target_col]
 
-    # Handle categorical targets (LabelEncoder for string labels).
-    le = None
-    if y_raw.dtype == object or y_raw.dtype.name == "category":
-        le = LabelEncoder()
-        y = le.fit_transform(y_raw.astype(str))
+def _looks_like_id(column):
+    if "_is_id_like" in globals():
+        return _is_id_like(column)
+    normalized = re.sub(r"[^a-z0-9]+", "_", str(column).strip().lower()).strip("_")
+    return (
+        normalized in {"id", "row_id", "record_id", "index", "uid"}
+        or normalized.endswith("_id")
+    )
+
+
+if train_df is None or train_df.empty:
+    decision_log.append("No training table was available; model creation was skipped.")
+    print("[model] no training data; skipping target and feature decisions")
+else:
+    target_candidates = [
+        column
+        for column in train_df.columns
+        if str(column).strip().lower() == "target"
+        or str(column).strip().lower().startswith("target_")
+    ]
+    if prior_target_col in train_df.columns:
+        target_col = prior_target_col
+        target_reason = "reused the target selected during exploratory analysis"
+    elif target_candidates:
+        target_col = target_candidates[0]
+        target_reason = "matched a target-like column name"
     else:
-        y = y_raw
+        target_col = train_df.columns[-1]
+        target_reason = "no target-like name was found, so the final train column was used"
+    decision_log.append(f"Target={target_col!r}: {target_reason}.")
 
-    # Feature columns = everything except id-like and target.
-    feature_cols = [c for c in train_df.columns
-                    if c != target_col and c.lower() not in ("id",)]
-    X = train_df[feature_cols]
+    excluded_columns = [column for column in train_df.columns if _looks_like_id(column)]
+    feature_cols = [
+        column
+        for column in train_df.columns
+        if column != target_col and column not in excluded_columns
+    ]
+    if len(feature_cols) > MAX_MODEL_FEATURES:
+        feature_cols = feature_cols[:MAX_MODEL_FEATURES]
+        decision_log.append(f"Capped model features at {MAX_MODEL_FEATURES} columns.")
+    model_feature_cols = list(feature_cols)
+    decision_log.append(
+        f"Excluded identifier-like columns={excluded_columns!r}; "
+        f"retained {len(feature_cols)} feature column(s)."
+    )
 
-    # HistGradientBoostingClassifier handles categoricals via OrdinalEncoder
-    # automatically when categorical_features is specified. For simplicity,
-    # let the classifier auto-detect object/category columns.
-    n_estimators = 50 + 25 * {{iteration}}
-    kwargs = {}
-    # If scikit-learn >= 1.2, we can pass categorical_features='from_dtype' or a list.
-    # Fallback: just let it run — it handles NaN natively and will ordinal-encode strings.
-    try:
-        model = HistGradientBoostingClassifier(
-            n_estimators=n_estimators, random_state=42
-        )
-    except Exception:
-        # Fallback for older sklearn versions
-        model = HistGradientBoostingClassifier(
-            max_iter=n_estimators, random_state=42
-        )
+    target_values = train_df[target_col]
+    valid_target = ~target_values.isna()
+    X = train_df.loc[valid_target, feature_cols].copy()
+    y_raw = target_values.loc[valid_target]
+    if y_raw.dtype == object or str(y_raw.dtype) == "category" or str(y_raw.dtype).startswith("string"):
+        target_encoder = LabelEncoder()
+        y = target_encoder.fit_transform(y_raw.astype(str))
+        decision_log.append("Encoded a string/categorical target with LabelEncoder.")
+    else:
+        y = y_raw.to_numpy()
+        decision_log.append("Kept the numeric target labels unchanged.")
 
-    try:
-        scores = cross_val_score(model, X, y, cv=3, scoring="accuracy")
-        train_loss = float(1.0 - scores.mean())
-    except Exception:
-        # Cross-validation may fail on small datasets or rare cases; try direct fit.
+    if len(X) > MAX_TRAIN_ROWS:
         try:
-            model.fit(X, y)
-            train_loss = 0.5  # placeholder when CV fails
-        except Exception as exc:
-            print(f"[experimentation] model fit failed: {exc}")
-            model = None
+            splitter = StratifiedShuffleSplit(n_splits=1, train_size=MAX_TRAIN_ROWS, random_state=42)
+            sampled_indices, _ = next(splitter.split(X, y))
+        except Exception:
+            rng = np.random.default_rng(42)
+            sampled_indices = np.sort(rng.choice(len(X), size=MAX_TRAIN_ROWS, replace=False))
+        X = X.iloc[sampled_indices]
+        y = np.asarray(y)[sampled_indices]
+        decision_log.append(
+            f"Capped model training at {MAX_TRAIN_ROWS} rows; EDA retained its separate sample."
+        )
 
-    if model is not None:
+    numeric_feature_cols = list(X.select_dtypes(include=[np.number]).columns)
+    categorical_feature_cols = [column for column in feature_cols if column not in numeric_feature_cols]
+    print(f"[model] target={target_col!r} ({target_reason})")
+    print(f"[model] excluded identifier-like columns: {excluded_columns}")
+    print(f"[model] numeric features={len(numeric_feature_cols)}, categorical features={len(categorical_feature_cols)}")
+    print(f"[model] rows with non-null target: {len(X)} / {len(train_df)}")
+
+
+# %% [markdown]
+# ## Feature policy and validation strategy
+#
+# Numeric features receive median imputation.  Non-numeric features receive
+# most-frequent imputation followed by ordinal encoding with an unknown-value
+# bucket, which keeps the generic scaffold usable across mixed competition
+# schemas.  Cross-validation is stratified when every class has enough rows;
+# otherwise the code falls back to a shuffled K-fold split or a direct fit.
+
+# %%
+iteration = {{iteration}}
+MAX_MODEL_ITER = 250
+MAX_CV_ROWS = 100_000
+numeric_feature_cols = list(X.select_dtypes(include=[np.number]).columns) if X is not None else []
+categorical_feature_cols = [column for column in feature_cols if column not in numeric_feature_cols]
+
+transformers = []
+if numeric_feature_cols:
+    transformers.append((
+        "numeric",
+        Pipeline([("imputer", SimpleImputer(strategy="median"))]),
+        numeric_feature_cols,
+    ))
+if categorical_feature_cols:
+    transformers.append((
+        "categorical",
+        Pipeline([
+            ("imputer", SimpleImputer(strategy="most_frequent")),
+            ("encoder", OrdinalEncoder(handle_unknown="use_encoded_value", unknown_value=-1)),
+        ]),
+        categorical_feature_cols,
+    ))
+
+max_iter = min(MAX_MODEL_ITER, 100 + 25 * iteration)
+learning_rate = max(0.03, 0.10 - 0.01 * max(0, iteration - 1))
+max_leaf_nodes = min(63, 31 + 8 * max(0, iteration - 1))
+min_samples_leaf = max(10, 20 - iteration)
+print(
+    f"[model] iteration={iteration}: max_iter={max_iter}, "
+    f"learning_rate={learning_rate:.3f}, max_leaf_nodes={max_leaf_nodes}, "
+    f"min_samples_leaf={min_samples_leaf}"
+)
+if max_iter < 100 + 25 * iteration:
+    print(f"[model] capped max_iter at {MAX_MODEL_ITER} to bound compute")
+decision_log.append(
+    "Increased capacity gradually with the iteration while lowering the learning "
+    "rate to make later optimization steps more conservative."
+)
+
+scoring_name = "f1"
+cv = None
+validation_X = X
+validation_y = np.asarray(y) if y is not None else None
+if validation_y is not None and len(validation_y) > MAX_CV_ROWS:
+    try:
+        splitter = StratifiedShuffleSplit(n_splits=1, train_size=MAX_CV_ROWS, random_state=42)
+        sampled_indices, _ = next(splitter.split(X, validation_y))
+    except Exception:
+        rng = np.random.default_rng(42)
+        sampled_indices = np.sort(rng.choice(len(validation_y), size=MAX_CV_ROWS, replace=False))
+    validation_X = X.iloc[sampled_indices]
+    validation_y = validation_y[sampled_indices]
+    print(f"[model] capped validation data at {MAX_CV_ROWS} rows; final fit still uses all rows")
+    decision_log.append(f"Sampled {MAX_CV_ROWS} rows for validation to bound memory and runtime.")
+
+if validation_y is not None and len(validation_y):
+    n_classes = len(np.unique(y))
+    scoring_name = "f1" if n_classes == 2 else "f1_macro"
+    class_counts = pd.Series(validation_y).value_counts()
+    min_class_count = int(class_counts.min()) if not class_counts.empty else 0
+    if min_class_count >= 2 and len(y) >= 4:
+        cv_splits = min(5, min_class_count)
+        cv = StratifiedKFold(n_splits=cv_splits, shuffle=True, random_state=42)
+        cv_reason = f"stratified {cv_splits}-fold CV because the smallest class has {min_class_count} rows"
+    elif len(y) >= 3:
+        cv_splits = min(3, len(y))
+        cv = KFold(n_splits=cv_splits, shuffle=True, random_state=42)
+        cv_reason = "shuffled K-fold CV because stratification was not possible"
+    else:
+        cv_reason = "no CV because the dataset is too small"
+    print(f"[model] classes={n_classes}, scoring={scoring_name}, validation={cv_reason}")
+    decision_log.append(f"Validation choice: {cv_reason}; scoring={scoring_name}.")
+
+if transformers and feature_cols:
+    preprocessor = ColumnTransformer(transformers=transformers, remainder="drop")
+    classifier = HistGradientBoostingClassifier(
+        max_iter=max_iter,
+        learning_rate=learning_rate,
+        max_leaf_nodes=max_leaf_nodes,
+        min_samples_leaf=min_samples_leaf,
+        random_state=42,
+    )
+    model = Pipeline([
+        ("preprocess", preprocessor),
+        ("classifier", classifier),
+    ])
+    decision_log.append("Used a preprocessing pipeline plus HistGradientBoostingClassifier.")
+else:
+    decision_log.append("No usable feature columns were found; training was skipped.")
+    print("[model] no usable features; training was skipped")
+
+
+# %% [markdown]
+# ## Cross-validation signal and iteration diagnostics
+#
+# The local loss is the complement of the mean validation score.  If the
+# preferred F1 score cannot be computed for a particular schema, accuracy is
+# used as an explicit fallback instead of hiding the failure.
+
+# %%
+if model is not None and validation_X is not None and validation_y is not None and len(np.unique(validation_y)) >= 2 and cv is not None:
+    try:
+        cv_scores = np.asarray(
+            cross_val_score(model, validation_X, validation_y, cv=cv, scoring=scoring_name, error_score="raise"),
+            dtype=float,
+        )
+        train_loss = float(1.0 - cv_scores.mean())
+        print(f"[model] {scoring_name} CV scores: {cv_scores.round(4).tolist()}")
+    except Exception as exc:
+        decision_log.append(f"{scoring_name} CV failed ({exc}); retried with accuracy.")
+        print(f"[model] {scoring_name} CV failed ({exc}); retrying with accuracy")
         try:
-            model.fit(X, y)
-        except Exception as exc:
-            print(f"[experimentation] final fit failed: {exc}")
-            model = None
+            cv_scores = np.asarray(
+                cross_val_score(model, validation_X, validation_y, cv=cv, scoring="accuracy", error_score="raise"),
+                dtype=float,
+            )
+            train_loss = float(1.0 - cv_scores.mean())
+            scoring_name = "accuracy"
+            print(f"[model] accuracy CV scores: {cv_scores.round(4).tolist()}")
+        except Exception as accuracy_exc:
+            decision_log.append(f"Accuracy CV also failed ({accuracy_exc}); using direct fit only.")
+            print(f"[model] accuracy CV also failed: {accuracy_exc}")
+else:
+    print("[model] validation signal unavailable; proceeding only if a direct fit is possible")
+
+plotter = globals().get("plt")
+if plotter is not None and cv_scores.size:
+    plotter.figure(figsize=(8, 4))
+    plotter.plot(range(1, len(cv_scores) + 1), cv_scores, marker="o", color="#1f78b4")
+    plotter.axhline(cv_scores.mean(), linestyle="--", color="#e31a1c", label="mean")
+    plotter.xlabel("Validation fold")
+    plotter.ylabel(scoring_name)
+    plotter.title(f"Iteration {iteration} validation scores")
+    plotter.legend()
+    plotter.tight_layout()
+    plotter.show()
+    plotter.close()
+
+
+# %% [markdown]
+# ## Final fit and hand-off
+#
+# Cross-validation measures the choice, then the selected pipeline is fit on all
+# rows with a valid target so the evaluation and deployment cells can reuse it.
+
+# %%
+if model is not None and X is not None and y is not None and len(np.unique(y)) >= 2:
+    try:
+        model.fit(X, y)
+        print(f"[model] final fit complete using {len(X)} row(s) and {len(feature_cols)} feature(s)")
+    except Exception as exc:
+        print(f"[model] final fit failed: {exc}")
+        decision_log.append(f"Final fit failed ({exc}); no model will be deployed.")
+        model = None
+
+for decision in decision_log:
+    print(f"[model decision] {decision}")
 
 print(f"#METRIC:train_loss={train_loss:.4f}")
-print(f"[experimentation iter={{iteration}}] model trained (max_iter={50 + 25 * {{iteration}}})")
+print(f"[model] iteration {iteration} complete; scoring signal={scoring_name}")

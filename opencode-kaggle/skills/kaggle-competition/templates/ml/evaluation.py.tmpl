@@ -1,57 +1,141 @@
-# Evaluation_Node - Traditional ML
-# Purpose: compute the local success metric that drives best_local_score.
-# Uses macro-averaged F1 (handles multiclass targets gracefully) and emits
-# #METRIC:f1=<float> — the harness parser matches state.primary_metric.
-from sklearn.metrics import f1_score, accuracy_score
-from sklearn.preprocessing import LabelEncoder
+# %% [markdown]
+# ## Local validation and model diagnostics
+#
+# Evaluation reuses the exact feature policy selected during experimentation.
+# The primary local metric is macro F1 for multiclass labels and binary F1 for
+# two classes; accuracy is reported as a transparent fallback when F1 is not
+# defined for an unusual competition schema.
+
+# %%
 import numpy as np
+import pandas as pd
+from sklearn.metrics import accuracy_score, confusion_matrix, f1_score
+from sklearn.preprocessing import LabelEncoder
+
 
 score = 0.0
-metric_name = "f1"  # default; the harness uses state.primary_metric
+metric_name = "f1"
+preds = None
+eval_y = None
+eval_X = None
+eval_target_col = globals().get("target_col")
+MAX_EVAL_ROWS = 250_000
+MAX_PREDICTION_BATCH_ROWS = 50_000
 
-if train_df is not None and "model" in dir() and model is not None:
-    # Determine target column using the same logic as experimentation.
-    target_col = None
-    for col in train_df.columns:
-        col_lower = col.lower()
-        if col_lower == "target" or col_lower.startswith("target_"):
-            target_col = col
-            break
-    if target_col is None:
-        target_col = train_df.columns[-1]
 
-    y_raw = train_df[target_col]
+def _predict_in_batches(estimator, frame):
+    """Predict in bounded batches so diagnostics do not duplicate full frames."""
+    if len(frame) <= MAX_PREDICTION_BATCH_ROWS:
+        return estimator.predict(frame)
+    batches = []
+    for start in range(0, len(frame), MAX_PREDICTION_BATCH_ROWS):
+        batches.append(estimator.predict(frame.iloc[start:start + MAX_PREDICTION_BATCH_ROWS]))
+    return np.concatenate(batches)
 
-    # Encode categorical targets if needed.
-    le = None
-    if y_raw.dtype == object or y_raw.dtype.name == "category":
-        le = LabelEncoder()
-        y = le.fit_transform(y_raw.astype(str))
+if train_df is not None and not train_df.empty and model is not None:
+    if eval_target_col not in train_df.columns:
+        target_candidates = [
+            column
+            for column in train_df.columns
+            if str(column).strip().lower() == "target"
+            or str(column).strip().lower().startswith("target_")
+        ]
+        eval_target_col = target_candidates[0] if target_candidates else train_df.columns[-1]
+
+    raw_target = train_df[eval_target_col]
+    valid_target = ~raw_target.isna()
+    feature_cols_for_eval = list(globals().get("model_feature_cols", []))
+    if not feature_cols_for_eval:
+        feature_cols_for_eval = [
+            column
+            for column in train_df.columns
+            if column != eval_target_col
+            and not str(column).strip().lower().endswith("_id")
+            and str(column).strip().lower() not in {"id", "index", "uid"}
+        ]
+    eval_X = train_df.loc[valid_target, feature_cols_for_eval].copy()
+    raw_target = raw_target.loc[valid_target]
+    if len(eval_X) > MAX_EVAL_ROWS:
+        eval_indices = np.linspace(0, len(eval_X) - 1, MAX_EVAL_ROWS, dtype=int)
+        eval_X = eval_X.iloc[eval_indices]
+        raw_target = raw_target.iloc[eval_indices]
+        print(f"[evaluation] local metric sample capped at {MAX_EVAL_ROWS} rows")
+
+    if raw_target.dtype == object or str(raw_target.dtype) == "category" or str(raw_target.dtype).startswith("string"):
+        eval_encoder = LabelEncoder()
+        eval_y = eval_encoder.fit_transform(raw_target.astype(str))
     else:
-        y = y_raw
-
-    n_classes = len(np.unique(y))
-    if n_classes > 2:
-        avg = "macro"
-    else:
-        avg = "binary"
-
-    feature_cols = [c for c in train_df.columns
-                    if c != target_col and c.lower() not in ("id",)]
-    X = train_df[feature_cols]
+        eval_y = raw_target.to_numpy()
 
     try:
-        preds = model.predict(X)
-        score = float(f1_score(y, preds, average=avg))
+        preds = _predict_in_batches(model, eval_X)
+        n_classes = len(np.unique(eval_y))
+        average = "macro" if n_classes > 2 else "binary"
+        score = float(f1_score(eval_y, preds, average=average))
+        print(f"[evaluation] target={eval_target_col!r}, classes={n_classes}, F1 average={average}")
     except Exception as exc:
-        print(f"[evaluation] f1_score failed ({exc}), falling back to accuracy")
+        print(f"[evaluation] F1 unavailable ({exc}); falling back to accuracy")
         try:
-            score = float(accuracy_score(y, preds))
+            if preds is None:
+                preds = _predict_in_batches(model, eval_X)
+            score = float(accuracy_score(eval_y, preds))
             metric_name = "accuracy"
-        except Exception:
+        except Exception as accuracy_exc:
+            print(f"[evaluation] accuracy also failed: {accuracy_exc}")
             score = 0.0
+else:
+    print("[evaluation] no fitted model and train data; score remains 0.0")
 
-# The PRIMARY metric marker. The harness parser keys on state.primary_metric
-# (default "f1" for ML). Direction (minimize) is set in competition_state.json.
+
+# %% [markdown]
+# ## Error analysis visuals
+#
+# Confusion matrices reveal class-specific errors, while the prediction-count
+# chart helps identify collapse toward a single class.  Very high-cardinality
+# targets are summarized numerically rather than rendered as unreadable axes.
+
+# %%
+plotter = globals().get("plt")
+if plotter is not None and preds is not None and eval_y is not None:
+    MAX_DIAGNOSTIC_ROWS = 100_000
+    diagnostic_y = np.asarray(eval_y)
+    diagnostic_preds = np.asarray(preds)
+    if len(diagnostic_y) > MAX_DIAGNOSTIC_ROWS:
+        diagnostic_indices = np.linspace(
+            0, len(diagnostic_y) - 1, MAX_DIAGNOSTIC_ROWS, dtype=int
+        )
+        diagnostic_y = diagnostic_y[diagnostic_indices]
+        diagnostic_preds = diagnostic_preds[diagnostic_indices]
+        print(
+            f"[evaluation] diagnostic plots sampled {MAX_DIAGNOSTIC_ROWS} "
+            "rows; the metric above used all rows"
+        )
+    labels = np.unique(np.concatenate([diagnostic_y, diagnostic_preds]))
+    if len(labels) <= 25:
+        matrix = confusion_matrix(diagnostic_y, diagnostic_preds, labels=labels)
+        plotter.figure(figsize=(max(6, len(labels) * 0.45), max(5, len(labels) * 0.4)))
+        image = plotter.imshow(matrix, cmap="Blues")
+        plotter.colorbar(image, label="Rows")
+        plotter.xticks(range(len(labels)), [str(label)[:14] for label in labels], rotation=60, ha="right")
+        plotter.yticks(range(len(labels)), [str(label)[:14] for label in labels])
+        plotter.xlabel("Predicted label")
+        plotter.ylabel("Actual label")
+        plotter.title("Confusion matrix")
+        plotter.tight_layout()
+        plotter.show()
+        plotter.close()
+
+        actual_counts = pd.Series(diagnostic_y).value_counts().rename("actual")
+        predicted_counts = pd.Series(diagnostic_preds).value_counts().rename("predicted")
+        counts = pd.concat([actual_counts, predicted_counts], axis=1).fillna(0)
+        counts.plot.bar(figsize=(9, 4), color=["#4daf4a", "#984ea3"])
+        plotter.ylabel("Rows")
+        plotter.title("Actual versus predicted class counts")
+        plotter.tight_layout()
+        plotter.show()
+        plotter.close()
+    else:
+        print(f"[evaluation] skipped confusion matrix for {len(labels)} classes")
+
 print(f"#METRIC:{metric_name}={score:.4f}")
-print("[evaluation] local metric computed; feeding best_local_score")
+print(f"[evaluation] local {metric_name}={score:.4f}; feeding best_local_score")

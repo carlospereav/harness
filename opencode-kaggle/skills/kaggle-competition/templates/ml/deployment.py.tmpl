@@ -1,16 +1,87 @@
-# DeploymentSync_Node - Traditional ML (notebook finalization cell)
-# Purpose: finalize the submission artifact. The CLI push / submit is performed
-# by the harness (DeploymentSync_Node action) AFTER this cell runs on Kaggle.
+# %% [markdown]
+# ## Submission artifact and final hand-off
+#
+# The fitted preprocessing/model pipeline is applied to the test rows using the
+# same feature list selected during experimentation.  A sample submission is
+# reused when its row count matches; otherwise a minimal CSV is created.
+
+# %%
+import numpy as np
 import pandas as pd
 
+
 sub_path = "submission.csv"
-if test_df is not None and "model" in dir() and model is not None:
-    feature_cols = [c for c in test_df.columns if not c.startswith("target")]
-    test_preds = model.predict(test_df[feature_cols])
-    id_col = "id" if "id" in test_df.columns else test_df.columns[0]
-    out = pd.DataFrame({id_col: test_df[id_col], "target": test_preds})
+MAX_PREDICTION_BATCH_ROWS = 50_000
+
+
+def _sanitize_submission_value(value):
+    """Escape formula-like strings before writing a CSV for spreadsheet safety."""
+    if isinstance(value, str) and value.lstrip().startswith(("=", "+", "-", "@")):
+        return "'" + value
+    return value
+
+
+def _sanitize_submission_header(value):
+    """Make CSV headers safe for spreadsheet readers and stable for duplicates."""
+    text = "".join(character if ord(character) >= 32 else "_" for character in str(value))
+    if text.lstrip().startswith(("=", "+", "-", "@")):
+        text = "'" + text
+    return text or "column"
+
+
+def _predict_in_batches(estimator, frame):
+    if len(frame) <= MAX_PREDICTION_BATCH_ROWS:
+        return estimator.predict(frame)
+    batches = []
+    for start in range(0, len(frame), MAX_PREDICTION_BATCH_ROWS):
+        batches.append(estimator.predict(frame.iloc[start:start + MAX_PREDICTION_BATCH_ROWS]))
+    return np.concatenate(batches)
+
+
+if test_df is not None and model is not None:
+    submission_features = list(globals().get("model_feature_cols", []))
+    if not submission_features:
+        submission_features = [
+            column
+            for column in test_df.columns
+            if not str(column).strip().lower().endswith("_id")
+            and str(column).strip().lower() not in {"id", "index", "uid"}
+        ]
+    test_features = test_df.reindex(columns=submission_features, fill_value=pd.NA)
+    test_preds = _predict_in_batches(model, test_features)
+
+    default_id = "id" if "id" in test_df.columns else test_df.columns[0]
+    output_target = globals().get("target_col") or "target"
+    if sample_sub is not None and len(sample_sub) == len(test_preds):
+        out = sample_sub.copy()
+        sample_id = default_id if default_id in out.columns else out.columns[0]
+        candidate_outputs = [column for column in out.columns if column != sample_id]
+        output_target = output_target if output_target in out.columns else (
+            candidate_outputs[-1] if candidate_outputs else "target"
+        )
+        out[output_target] = test_preds
+        print(f"[submission] reused sample submission column {output_target!r}")
+    else:
+        out = pd.DataFrame({default_id: test_df[default_id], output_target: test_preds})
+        print("[submission] created a minimal submission because no matching sample was available")
+
+    for column in out.columns:
+        if pd.api.types.is_object_dtype(out[column]) or pd.api.types.is_string_dtype(out[column]):
+            out[column] = out[column].map(_sanitize_submission_value)
+    safe_headers = []
+    seen_headers = set()
+    for column in out.columns:
+        base = _sanitize_submission_header(column)
+        header = base
+        suffix = 2
+        while header in seen_headers:
+            header = f"{base}_{suffix}"
+            suffix += 1
+        seen_headers.add(header)
+        safe_headers.append(header)
+    out.columns = safe_headers
     out.to_csv(sub_path, index=False)
-    print(f"[deployment] wrote {sub_path} ({len(out)} rows)")
+    print(f"[submission] wrote {sub_path} ({len(out)} rows, target={output_target!r})")
 else:
-    print("[deployment] no model/test data; submission not generated")
-print("[deployment] ready for kaggle kernels push / competitions submit")
+    print("[submission] no fitted model/test data; submission was not generated")
+print("[submission] ready for the explicit Kaggle push or competition submit action")

@@ -1,39 +1,357 @@
-# DataIngestion_Node - Traditional ML
-# Competition: {{competition}}
-# Purpose: recursively walk /kaggle/input, print what's mounted, and load
-# train/test/sample-submission CSVs by name wherever they are found.
-import os
+# %% [markdown]
+# ## Dataset intake and exploratory analysis
+#
+# First make the mounted files and the dataset's shape visible.  The following
+# cells deliberately separate inspection from transformation so that every
+# modeling decision can be traced back to an observed property of the data.
 
+# %%
+import os
+import re
+import zipfile
+
+import numpy as np
 import pandas as pd
 
+try:
+    import matplotlib.pyplot as plt
+except Exception as exc:  # pragma: no cover - Kaggle normally provides matplotlib
+    plt = None
+    print(f"[eda] plotting unavailable: {exc}")
+
+
 DATA_DIR = "/kaggle/input"
+MAX_DISCOVERY_FILES = 2000
+MAX_PRINTED_FILES = 200
+MAX_DIRECTORY_ENTRIES = 1000
+MAX_INPUT_DEPTH = 8
+MAX_INPUT_FILE_BYTES = 256 * 1024 * 1024
+MAX_ARCHIVE_MEMBERS = 1000
+MAX_ARCHIVE_UNCOMPRESSED_BYTES = 512 * 1024 * 1024
+MAX_EDA_ROWS = 100_000
+MAX_EDA_COLUMNS = 100
+MAX_PROFILE_COLUMNS = 50
+MAX_CATEGORICAL_PROFILES = 25
+MAX_CORRELATION_COLUMNS = 30
+MAX_NUMERIC_PLOTS = 12
+MAX_OUTPUT_CHARS = 100_000
 print(f"[ingestion] walking {DATA_DIR} (competition: {{competition}})")
 
 train_df = None
 test_df = None
 sample_sub = None
+_discovered_files = 0
+_output_chars_used = 0
+_inventory_suppressed = False
+_scan_limit_reached = False
 
-# Walk recursively and print every file found.
-for root, dirs, files in os.walk(DATA_DIR):
-    for fname in sorted(files):
-        fpath = os.path.join(root, fname)
-        print(f"[ingestion]   found: {fpath}")
-        if fname.endswith("train.csv") or fname.endswith("train.zip"):
-            train_df = pd.read_csv(fpath)
-        elif fname.endswith("test.csv") or fname.endswith("test.zip"):
-            test_df = pd.read_csv(fpath)
-        elif "sample_submission" in fname:
-            sample_sub = pd.read_csv(fpath)
 
-if train_df is not None:
-    print(f"[ingestion] train shape: {train_df.shape}")
-    print(f"[ingestion] train columns: {list(train_df.columns)}")
+def _is_split_file(filename, split):
+    """Return whether *filename* looks like a train/test table."""
+    stem = os.path.splitext(str(filename).lower())[0]
+    return stem == split or stem.endswith(f"_{split}") or stem.endswith(f"-{split}")
+
+
+def _read_csv_safely(path, label):
+    try:
+        resolved_path = os.path.realpath(path)
+        data_root = os.path.realpath(DATA_DIR)
+        if os.path.islink(path) or os.path.commonpath([data_root, resolved_path]) != data_root:
+            _print_limited("[ingestion] WARNING: skipped unsafe input path for ", label)
+            return None
+        file_size = os.path.getsize(resolved_path)
+        if file_size > MAX_INPUT_FILE_BYTES:
+            _print_limited(
+                "[ingestion] WARNING: skipped oversized input: ",
+                f"{label} (limit={MAX_INPUT_FILE_BYTES} bytes)",
+            )
+            return None
+        if str(resolved_path).lower().endswith(".zip"):
+            with zipfile.ZipFile(resolved_path) as archive:
+                members = archive.infolist()
+                uncompressed = sum(member.file_size for member in members if not member.is_dir())
+                if len(members) > MAX_ARCHIVE_MEMBERS or uncompressed > MAX_ARCHIVE_UNCOMPRESSED_BYTES:
+                    _print_limited("[ingestion] WARNING: skipped unsafe archive: ", label)
+                    return None
+        frame = pd.read_csv(path)
+        _print_limited("[ingestion] loaded table: ", f"{label} ({frame.shape})")
+        return frame
+    except Exception as exc:
+        _print_limited("[ingestion] WARNING: could not read table: ", f"{label}: {exc}")
+        return None
+
+
+def _print_limited(prefix, value):
+    """Print a bounded diagnostic fragment without exhausting notebook output."""
+    global _output_chars_used
+    if _output_chars_used >= MAX_OUTPUT_CHARS:
+        return
+    text = str(value)
+    remaining = MAX_OUTPUT_CHARS - _output_chars_used
+    if len(text) > remaining:
+        text = text[:remaining] + "\n[eda] output budget reached; remaining detail suppressed"
+    print(prefix + text)
+    _output_chars_used += len(text)
+
+
+def _iter_input_files(directory, depth=0):
+    """Yield bounded, regular files beneath the input root without following symlinks."""
+    if depth > MAX_INPUT_DEPTH:
+        _print_limited("[ingestion] WARNING: skipped deep input path: ", f"> {MAX_INPUT_DEPTH} levels")
+        return
+    try:
+        with os.scandir(directory) as entries:
+            entry_count = 0
+            for entry in entries:
+                entry_count += 1
+                if entry_count > MAX_DIRECTORY_ENTRIES:
+                    _print_limited(
+                        "[ingestion] WARNING: capped directory scan: ",
+                        f"{directory} ({MAX_DIRECTORY_ENTRIES} entries)",
+                    )
+                    break
+                if entry.is_symlink():
+                    continue
+                if entry.is_dir(follow_symlinks=False):
+                    yield from _iter_input_files(entry.path, depth + 1)
+                elif entry.is_file(follow_symlinks=False):
+                    resolved = os.path.realpath(entry.path)
+                    root = os.path.realpath(DATA_DIR)
+                    if os.path.commonpath([root, resolved]) == root:
+                        yield resolved
+    except (OSError, ValueError) as exc:
+        _print_limited("[ingestion] WARNING: could not inspect input directory: ", exc)
+
+
+# Recursively inspect the mount.  Competition datasets are not guaranteed to
+# use /kaggle/input/<competition> as their direct directory.
+for fpath in _iter_input_files(DATA_DIR):
+    _discovered_files += 1
+    if _discovered_files > MAX_DISCOVERY_FILES:
+        _scan_limit_reached = True
+        break
+    fname = os.path.basename(fpath)
+    lower = fname.lower()
+    if _discovered_files <= MAX_PRINTED_FILES:
+        _print_limited("[ingestion]   found: ", fpath)
+    elif not _inventory_suppressed:
+        _print_limited(
+            "[ingestion]   ",
+            f"additional file paths suppressed after {MAX_PRINTED_FILES}",
+        )
+        _inventory_suppressed = True
+    if not lower.endswith((".csv", ".zip")):
+        continue
+    if "sample_submission" in lower and sample_sub is None:
+        sample_sub = _read_csv_safely(fpath, "sample submission")
+    elif train_df is None and _is_split_file(fname, "train"):
+        train_df = _read_csv_safely(fpath, "train")
+    elif test_df is None and _is_split_file(fname, "test"):
+        test_df = _read_csv_safely(fpath, "test")
+
+if _scan_limit_reached:
+    _print_limited("[ingestion] WARNING: file discovery capped: ", f"{MAX_DISCOVERY_FILES} files")
 else:
-    print("[ingestion] WARNING: no train.csv found — check competition data mount")
+    _print_limited("[ingestion] inspected mounted files: ", _discovered_files)
 
-if test_df is not None:
-    print(f"[ingestion] test shape: {test_df.shape}")
-    print(f"[ingestion] test columns: {list(test_df.columns)}")
+if train_df is None:
+    print("[ingestion] WARNING: no train table found; inspect the file inventory above")
+if test_df is None:
+    print("[ingestion] WARNING: no test table found; submission generation may be skipped")
+if sample_sub is None:
+    print("[ingestion] INFO: no sample submission found")
+
+
+def _find_target_column(frame):
+    """Choose a target-like column, falling back to the final train column."""
+    if frame is None or frame.empty:
+        return None
+    for column in frame.columns:
+        normalized = str(column).strip().lower()
+        if normalized == "target" or normalized.startswith("target_"):
+            return column
+    return frame.columns[-1]
+
+
+def _is_id_like(column):
+    """Identify common identifier columns that should not drive the model."""
+    normalized = re.sub(r"[^a-z0-9]+", "_", str(column).strip().lower()).strip("_")
+    return (
+        normalized in {"id", "row_id", "record_id", "index", "uid"}
+        or normalized.endswith("_id")
+    )
+
+
+# %% [markdown]
+# ## Dataset profile and data-quality audit
+#
+# This profile reports dimensions, types, duplicate rows, missingness,
+# cardinality, target balance, and train/test schema differences.  These
+# observations are intentionally printed before preprocessing changes the data.
+
+# %%
+target_col = _find_target_column(train_df)
+def _bounded_eda_frame(frame, target=None):
+    """Sample rows and columns for diagnostics while preserving full model data."""
+    if frame is None:
+        return None
+    columns = list(frame.columns[:MAX_EDA_COLUMNS])
+    if target is not None and target in frame.columns and target not in columns:
+        columns[-1] = target
+    bounded = frame.loc[:, columns]
+    if len(bounded) > MAX_EDA_ROWS:
+        bounded = bounded.sample(n=MAX_EDA_ROWS, random_state=42)
+    return bounded
+
+
+train_profile_df = _bounded_eda_frame(train_df, target_col)
+test_profile_df = _bounded_eda_frame(test_df)
+numeric_cols = []
+categorical_cols = []
+missing_table = pd.DataFrame()
+unique_table = pd.DataFrame()
+target_counts = pd.Series(dtype="int64")
+
+if train_profile_df is not None:
+    numeric_cols = list(train_profile_df.select_dtypes(include=[np.number]).columns)
+    categorical_cols = list(train_profile_df.select_dtypes(exclude=[np.number]).columns)
+    missing_table = pd.DataFrame({
+        "missing_count": train_profile_df.isna().sum(),
+        "missing_fraction": train_profile_df.isna().mean(),
+        "dtype": train_profile_df.dtypes.astype(str),
+    }).sort_values(["missing_count", "missing_fraction"], ascending=False)
+    unique_table = train_profile_df.nunique(dropna=False).sort_values(ascending=False).rename("unique_values")
+
+    print(f"[eda] train shape: {train_df.shape}")
+    print(f"[eda] duplicate rows in diagnostic sample: {int(train_profile_df.duplicated().sum())}")
+    _print_limited(f"[eda] numeric columns ({len(numeric_cols)}): ", numeric_cols[:MAX_PROFILE_COLUMNS])
+    _print_limited(
+        f"[eda] non-numeric columns ({len(categorical_cols)}): ",
+        categorical_cols[:MAX_PROFILE_COLUMNS],
+    )
+    print(f"[eda] target column: {target_col!r}")
+    if target_col is not None:
+        target_counts = train_profile_df[target_col].astype("string").fillna("<missing>").value_counts()
+        _print_limited("[eda] target distribution:\n", target_counts.head(50).to_string())
+
+    _print_limited(
+        "[eda] column profile (bounded preview):\n",
+        missing_table.head(MAX_PROFILE_COLUMNS).to_string(),
+    )
+    _print_limited(
+        "[eda] unique-value counts (bounded preview):\n",
+        unique_table.head(MAX_PROFILE_COLUMNS).to_string(),
+    )
+    if numeric_cols:
+        _print_limited(
+            "[eda] numeric summary (bounded preview):\n",
+            train_profile_df[numeric_cols[:MAX_PROFILE_COLUMNS]].describe().T.to_string(),
+        )
+    else:
+        print("[eda] no numeric columns")
+
+    for column in categorical_cols[:MAX_CATEGORICAL_PROFILES]:
+        counts = train_profile_df[column].astype("string").fillna("<missing>").value_counts().head(10)
+        _print_limited(f"[eda] top values for {column!r}:\n", counts.to_string())
+
+if test_profile_df is not None:
+    print(f"[eda] test shape: {test_df.shape}")
+    if train_profile_df is not None:
+        train_columns = set(train_profile_df.columns)
+        test_columns = set(test_profile_df.columns)
+        _print_limited("[eda] train-only columns: ", sorted(train_columns - test_columns)[:MAX_PROFILE_COLUMNS])
+        _print_limited("[eda] test-only columns: ", sorted(test_columns - train_columns)[:MAX_PROFILE_COLUMNS])
+        common_columns = sorted(train_columns & test_columns)
+        print(f"[eda] shared columns: {len(common_columns)}")
+        print(f"[eda] duplicate rows in test diagnostic sample: {int(test_profile_df.duplicated().sum())}")
 
 if sample_sub is not None:
-    print(f"[ingestion] sample_submission shape: {sample_sub.shape}")
+    print(f"[eda] sample submission shape: {sample_sub.shape}")
+    _print_limited("[eda] sample submission columns: ", list(sample_sub.columns)[:MAX_PROFILE_COLUMNS])
+
+
+# %% [markdown]
+# ## Visual diagnostics
+#
+# Every chart is guarded for empty data, missing columns, and unavailable
+# plotting support.  High-cardinality columns are limited to their most common
+# values so the notebook remains readable while still exposing useful patterns.
+
+# %%
+plot_count = 0
+
+
+def _finish_plot(title):
+    global plot_count
+    if plt is None:
+        return
+    plt.title(title)
+    plt.tight_layout()
+    plt.show()
+    plt.close()
+    plot_count += 1
+
+
+if plt is not None and train_profile_df is not None:
+    # 1. Missingness overview.
+    missing_to_plot = missing_table[missing_table["missing_count"] > 0].head(30)
+    if not missing_to_plot.empty:
+        plt.figure(figsize=(10, max(4, len(missing_to_plot) * 0.25)))
+        missing_to_plot["missing_fraction"].sort_values().plot.barh(color="#d95f02")
+        plt.xlabel("Fraction of rows missing")
+        _finish_plot("Missingness by column")
+
+    # 2. Target balance.
+    if target_col is not None and not target_counts.empty:
+        plt.figure(figsize=(10, 4))
+        target_counts.head(30).sort_values().plot.barh(color="#1b9e77")
+        plt.xlabel("Rows")
+        _finish_plot(f"Target distribution: {target_col}")
+
+    # 3. Numeric histograms, one figure per feature for easy inspection.
+    for column in numeric_cols[:MAX_NUMERIC_PLOTS]:
+        values = pd.to_numeric(train_profile_df[column], errors="coerce").dropna()
+        if values.nunique() > 1:
+            plt.figure(figsize=(8, 4))
+            values.plot.hist(bins=30, color="#7570b3", alpha=0.85)
+            plt.xlabel(str(column))
+            _finish_plot(f"Numeric distribution: {column}")
+
+    # 4. Numeric correlation heatmap.
+    corr_cols = numeric_cols[:MAX_CORRELATION_COLUMNS]
+    if len(corr_cols) >= 2:
+        corr = train_profile_df[corr_cols].corr()
+        plt.figure(figsize=(min(14, max(7, len(corr_cols) * 0.45)), min(14, max(6, len(corr_cols) * 0.4))))
+        image = plt.imshow(corr, cmap="coolwarm", vmin=-1, vmax=1, aspect="auto")
+        plt.colorbar(image, label="Pearson correlation")
+        plt.xticks(range(len(corr_cols)), [str(c)[:18] for c in corr_cols], rotation=75, ha="right")
+        plt.yticks(range(len(corr_cols)), [str(c)[:18] for c in corr_cols])
+        _finish_plot("Numeric feature correlation")
+
+    # 5. Categorical frequency charts.
+    for column in [c for c in categorical_cols if c != target_col][:8]:
+        counts = train_profile_df[column].astype("string").fillna("<missing>").value_counts().head(12)
+        if not counts.empty:
+            plt.figure(figsize=(9, 4))
+            counts.sort_values().plot.barh(color="#e7298a")
+            plt.xlabel("Rows")
+            _finish_plot(f"Most common values: {column}")
+
+    # 6. Train/test numeric distribution comparison.
+    if test_profile_df is not None:
+        common_numeric = [c for c in numeric_cols if c in test_profile_df.columns]
+        for column in common_numeric[:8]:
+            train_values = pd.to_numeric(train_profile_df[column], errors="coerce").dropna()
+            test_values = pd.to_numeric(test_profile_df[column], errors="coerce").dropna()
+            if not train_values.empty and not test_values.empty:
+                plt.figure(figsize=(8, 4))
+                plt.hist(train_values, bins=30, alpha=0.55, label="train", density=True)
+                plt.hist(test_values, bins=30, alpha=0.55, label="test", density=True)
+                plt.xlabel(str(column))
+                plt.ylabel("Density")
+                plt.legend()
+                _finish_plot(f"Train/test distribution: {column}")
+else:
+    print("[eda] no plots rendered (missing train data or matplotlib)")
+
+print(f"[eda] completed profile with {plot_count} rendered figure(s)")

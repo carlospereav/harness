@@ -170,6 +170,83 @@ def check_templates_and_render(r: Results, _ws: Path) -> None:
     r.record(name, all_ok, detail)
 
 
+def check_ml_template_quality(r: Results, _ws: Path) -> None:
+    name = "04b ML templates document decisions, expand EDA, and avoid node labels"
+    tdir = kaggle_comp._TEMPLATES_DIR / "ml"
+    texts = {
+        node: (tdir / f"{node}.py.tmpl").read_text(encoding="utf-8")
+        for node in ("ingestion", "processing", "experimentation", "evaluation", "deployment")
+    }
+    forbidden_labels = [
+        "DataIngestion_Node",
+        "DataProcessing_Node",
+        "Experimentation_Node",
+        "Evaluation_Node",
+        "DeploymentSync_Node",
+    ]
+    labels_removed = not any(label in text for text in texts.values() for label in forbidden_labels)
+    markdown_cells = sum(text.count("# %% [markdown]") for text in texts.values())
+    eda_signals = all(
+        signal in texts["ingestion"]
+        for signal in (
+            "missing_table",
+            "target_counts",
+            "imshow",
+            "plt.hist",
+            "Train/test distribution",
+            "MAX_DISCOVERY_FILES",
+            "MAX_DIRECTORY_ENTRIES",
+            "MAX_INPUT_FILE_BYTES",
+            "MAX_EDA_ROWS",
+            "MAX_CORRELATION_COLUMNS",
+            "MAX_OUTPUT_CHARS",
+            "_iter_input_files",
+            "_print_limited",
+        )
+    )
+    decision_signals = all(
+        signal in texts["experimentation"]
+        for signal in (
+            "target_reason",
+            "decision_log",
+            "Validation choice",
+            "learning_rate",
+            "MAX_TRAIN_ROWS",
+            "MAX_MODEL_FEATURES",
+            "MAX_MODEL_ITER",
+            "MAX_CV_ROWS",
+            "# %% [markdown]",
+        )
+    )
+    diagnostics = all(
+        signal in texts["evaluation"]
+        for signal in (
+            "confusion_matrix",
+            "Actual versus predicted class counts",
+            "MAX_EVAL_ROWS",
+            "MAX_DIAGNOSTIC_ROWS",
+            "_predict_in_batches",
+            "#METRIC:",
+        )
+    )
+    submission_safety = all(
+        signal in texts["deployment"]
+        for signal in ("_sanitize_submission_value", "_sanitize_submission_header", "MAX_PREDICTION_BATCH_ROWS")
+    )
+    r.record(
+        name,
+        labels_removed
+        and markdown_cells >= 8
+        and eda_signals
+        and decision_signals
+        and diagnostics
+        and submission_safety,
+        f"labels_removed={labels_removed} markdown_cells={markdown_cells} "
+        f"eda={eda_signals} decisions={decision_signals} diagnostics={diagnostics} "
+        f"submission_safety={submission_safety}",
+    )
+
+
 def check_init(r: Results, ws: Path) -> None:
     name = "05 init scaffolds state + PRIVATE metadata + notebook + code.py"
     rc, _, _ = run_helper(["init", "myinit", "--title", "My", "--mode", "ml"], ws)
@@ -186,7 +263,7 @@ def check_init(r: Results, ws: Path) -> None:
     )
     meta_ok = (
         meta is not None
-        and str(meta.get("is_private", "")).lower() == "false"
+        and str(meta.get("is_private", "")).lower() == "true"
         and meta.get("competition_sources") == ["myinit"]
     )
     r.record(name, rc == 0 and files_ok and state_ok and meta_ok,
@@ -258,10 +335,24 @@ def check_run_headers_privacy(r: Results, ws: Path, mode: str) -> None:
     push_ok = "[DRY-RUN] kaggle kernels push -p" in out
     hint_ok = "Submit to Competition" in out and "score NO aparecera" in out
     meta = load_meta(comp, ws)
-    privacy_ok = meta is not None and str(meta.get("is_private", "")).lower() == "false"
+    privacy_ok = meta is not None and str(meta.get("is_private", "")).lower() == "true"
     comp_src_ok = meta is not None and "competition_sources" in meta and comp in meta["competition_sources"]
     r.record(name, rc == 0 and headers_ok and push_ok and hint_ok and privacy_ok and comp_src_ok,
-             f"rc={rc} headers={headers_ok} push={push_ok} hint={hint_ok} priv={privacy_ok} comp_src={comp_src_ok}")
+              f"rc={rc} headers={headers_ok} push={push_ok} hint={hint_ok} priv={privacy_ok} comp_src={comp_src_ok}")
+
+
+def check_competition_privacy_enforced(r: Results, ws: Path) -> None:
+    name = "09b deployment validation forces competition metadata to is_private=true"
+    comp = "privacyfix"
+    run_helper(["init", comp, "--mode", "ml", "--submission", "notebook"], ws)
+    d = ws / "competitions" / comp
+    meta_path = d / "kernel-metadata.json"
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta["is_private"] = "false"
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+    kaggle_comp._validate_meta_for_deploy(d, comp)
+    repaired = json.loads(meta_path.read_text(encoding="utf-8"))
+    r.record(name, str(repaired.get("is_private", "")).lower() == "true")
 
 
 def check_submit_routing(r: Results, ws: Path) -> None:
@@ -507,9 +598,16 @@ def check_fetch_notebook_stdout(r: Results, ws: Path) -> None:
 
 
 def check_ingestion_oswalk(r: Results, ws: Path) -> None:
-    name = "14b rendered ml ingestion contains os.walk(/kaggle/input); no hard dep on /input/<comp>"
+    name = "14b rendered ml ingestion safely walks /kaggle/input; no hard dep on /input/<comp>"
     rendered = kaggle_comp.render_template("ingestion", "ml", competition="mycomp", iteration=1)
-    has_walk = 'os.walk("/kaggle/input")' in rendered or "os.walk('/kaggle/input')" in rendered or 'os.walk(DATA_DIR)' in rendered
+    has_walk = (
+        "_iter_input_files" in rendered
+        or 'os.scandir("/kaggle/input")' in rendered
+        or "os.scandir(DATA_DIR)" in rendered
+        or 'os.walk("/kaggle/input")' in rendered
+        or "os.walk('/kaggle/input')" in rendered
+        or "os.walk(DATA_DIR)" in rendered
+    )
     no_hard = "/kaggle/input/mycomp" not in rendered
     r.record(name, has_walk and no_hard,
              f"walk={has_walk} no_hard_dep={no_hard}")
@@ -569,7 +667,7 @@ def check_status_file_submission_note(r: Results, ws: Path) -> None:
 
 
 def check_notebook_cells_segregated(r: Results, ws: Path) -> None:
-    name = "14g run --dry-run produces segregated notebook cells (# %% in code.py, multi-cell ipynb)"
+    name = "14g run --dry-run produces documented cells without node labels"
     comp = "cellseg"
     run_helper(["init", comp], ws)
     rc, out, _ = run_helper(["run", comp, "--dry-run"], ws)
@@ -595,7 +693,29 @@ def check_notebook_cells_segregated(r: Results, ws: Path) -> None:
     cells_ok = len(code_cells) >= 5  # ingestion, processing, exp, eval, deployment
 
     first_cell = "".join(code_cells[0].get("source", [])) if code_cells else ""
-    ingestion_header_ok = "# DataIngestion_Node" in first_cell
+    ingestion_code_ok = "DATA_DIR" in first_cell and "train_df" in first_cell
+
+    markdown_cells = [c for c in all_cells if c.get("cell_type") == "markdown"]
+    markdown_text = "\n".join("".join(c.get("source", [])) for c in markdown_cells)
+    markdown_ok = (
+        len(markdown_cells) >= 8
+        and "Dataset intake and exploratory analysis" in markdown_text
+        and "Model objective and target decision" in markdown_text
+        and "Error analysis visuals" in markdown_text
+    )
+
+    node_labels = [
+        "DataIngestion_Node",
+        "DataProcessing_Node",
+        "Experimentation_Node",
+        "Evaluation_Node",
+        "DeploymentSync_Node",
+    ]
+    labels_absent_ok = not any(
+        label in "".join(cell.get("source", []))
+        for cell in all_cells
+        for label in node_labels
+    )
 
     # No cell should have "# %%" (delimiter stripped on injection)
     markers_stripped_ok = all(
@@ -610,12 +730,21 @@ def check_notebook_cells_segregated(r: Results, ws: Path) -> None:
     )
     preamble_dropped_ok = not header_in_cell
 
-    r.record(name,
-             rc == 0 and delims_present and cells_ok and ingestion_header_ok
-             and markers_stripped_ok and preamble_dropped_ok,
-             f"rc={rc} delims={delims_present} cells={len(code_cells)} "
-             f"ing={ingestion_header_ok} markers={markers_stripped_ok} "
-             f"preamble={preamble_dropped_ok}")
+    r.record(
+        name,
+        rc == 0
+        and delims_present
+        and cells_ok
+        and ingestion_code_ok
+        and markdown_ok
+        and labels_absent_ok
+        and markers_stripped_ok
+        and preamble_dropped_ok,
+        f"rc={rc} delims={delims_present} code_cells={len(code_cells)} "
+        f"markdown_cells={len(markdown_cells)} ingestion={ingestion_code_ok} "
+        f"markdown={markdown_ok} labels_absent={labels_absent_ok} "
+        f"markers={markers_stripped_ok} preamble={preamble_dropped_ok}",
+    )
 
 
 def check_clean(r: Results, _ws: Path) -> None:
@@ -646,12 +775,14 @@ def main() -> int:
         check_help(r, ws)
         check_import_kaggle_nb(r, ws)
         check_templates_and_render(r, ws)
+        check_ml_template_quality(r, ws)
         check_init(r, ws)
         check_state_show(r, ws)
         check_state_update_metric(r, ws)
         check_metric_parser(r, ws)
         check_run_headers_privacy(r, ws, "ml")
         check_run_headers_privacy(r, ws, "genai")
+        check_competition_privacy_enforced(r, ws)
         check_submit_routing(r, ws)
         check_detect(r, ws)
         check_remote_cmds_dryrun(r, ws)

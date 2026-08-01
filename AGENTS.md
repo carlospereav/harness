@@ -54,12 +54,11 @@ harness/
 All 9 defects below were patched in the commit that contains this note. The
 fixes span `kaggle_nb.py`, `kaggle_comp.py`, 4 templates, and both smoke tests.
 
-### 1. Forced `is_private=true` blocks medal eligibility — ✅ FIXED
+### 1. Competition notebook privacy — ✅ ENFORCED
 `kaggle_nb.default_metadata` now accepts a `private` param (default `False`).
-`kaggle_comp.comp_metadata` passes `private=False` so competition notebooks
-default to public. `cmd_push` in `kaggle_nb.py` no longer re-forces private
-when `is_private` is explicitly `"false"`; `_validate_meta_for_deploy` stopped
-re-forcing it too. Scratch notebooks via `/kaggle new` still stay private
+`kaggle_comp.comp_metadata` passes `private=True`, and
+`_validate_meta_for_deploy` repairs any non-private competition metadata before
+deployment. Scratch notebooks via `/kaggle new` also stay private
 (`private=True` in `cmd_new`).
 
 ### 2. Kernel `id` is the bare slug → `Invalid slug` on push — ✅ FIXED
@@ -115,7 +114,8 @@ fails). Target column detection matches the experimentation template.
 ## Cell segregation (2026-07-30)
 
 The competition harness now uses **percent-format** ``# %%`` delimiters in
-``code.py`` so each pipeline node renders as its own notebook cell on Kaggle.
+``code.py`` so each pipeline step renders as a readable sequence of notebook
+cells on Kaggle.
 Previously the entire ``code.py`` was dumped into a single code cell, making
 notebooks hard to read and debug. Key changes:
 
@@ -123,7 +123,9 @@ notebooks hard to read and debug. Key changes:
   code. ``code.py`` remains a single editable flat file.
 - ``kaggle_nb.set_notebook_code`` splits on ``# %%`` lines into separate cells;
   markers are stripped from the published notebook. ``# %% [markdown]`` segments
-  become markdown cells (future-proof for narrative).
+  become markdown cells. The ML competition templates use those cells for
+  narrative headings and decision logs instead of embedding ``*_Node`` labels
+  in code cells.
 - **Backward-compatible**: no ``# %%`` → single cell (verbatim source, existing
   ``write-code`` / ``push`` unchanged).
 - Smoke tests: ``check_write_code_splits_on_percent`` (kaggle-nb) and

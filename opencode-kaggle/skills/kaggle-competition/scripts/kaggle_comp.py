@@ -166,15 +166,14 @@ def comp_metadata(comp: str, *, title: str | None = None, gpu: bool = False,
                   internet: bool = False, datasets=()) -> dict:
     meta = kaggle_nb.default_metadata(
         comp, title=title, gpu=gpu, internet=internet, datasets=datasets,
-        private=False,  # competition notebooks must be public for medals
+        private=True,  # competition notebooks stay private to protect EDA output
     )
     meta["competition_sources"] = [comp]  # attach to competition
     return meta
 
 
 def _validate_meta_for_deploy(d: Path, comp: str) -> None:
-    """Pre-flight check for DeploymentSync. Fixes competition_sources + kernel_type.
-    Does NOT re-force privacy — competition notebooks default to public (medals)."""
+    """Pre-flight check for DeploymentSync and enforce private competition notebooks."""
     try:
         meta = kaggle_nb.read_metadata(d)
     except FileNotFoundError:
@@ -183,7 +182,9 @@ def _validate_meta_for_deploy(d: Path, comp: str) -> None:
         kaggle_nb.write_empty_notebook(d)
         return
     issues = []
-    # No longer re-forces is_private — honors whatever the metadata says.
+    if str(meta.get("is_private", "")).lower() != "true":
+        issues.append("is_private != true")
+        meta["is_private"] = "true"
     if comp not in (meta.get("competition_sources") or []):
         issues.append(f"competition_sources missing {comp}")
         meta["competition_sources"] = [comp]
@@ -456,7 +457,7 @@ def cmd_init(args: argparse.Namespace) -> int:
         encoding="utf-8",
     )
     print(f"  wrote {d / kaggle_nb.CODE_PY}")
-    print("  notebook PUBLIC (is_private=false) — medals/lb eligible; competition_sources set")
+    print("  notebook PRIVATE (is_private=true) — EDA output protected; competition_sources set")
     return 0
 
 

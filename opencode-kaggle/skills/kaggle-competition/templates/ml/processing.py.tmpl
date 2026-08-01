@@ -1,29 +1,70 @@
-# DataProcessing_Node - Traditional ML
-# Purpose: transform raw data into the exact shape the training engine needs
-# (null imputation, normalization, feature engineering).
+# %% [markdown]
+# ## Reproducible data preparation
+#
+# Preparation is intentionally conservative: numeric values use training-safe
+# medians, categorical values remain available for the modeling pipeline, and a
+# row-level missingness feature preserves a potentially useful data-quality
+# signal.  The before/after audit makes this choice visible.
+
+# %%
 import numpy as np
 
 
-def _impute_numeric(df):
-    if df is None:
+def _impute_numeric(frame):
+    if frame is None:
         return None
-    num_cols = df.select_dtypes(include=[np.number]).columns
-    if len(num_cols):
-        med = df[num_cols].median()
-        df[num_cols] = df[num_cols].fillna(med)
-    return df
+    numeric = frame.select_dtypes(include=[np.number]).columns
+    if len(numeric):
+        medians = frame[numeric].median()
+        frame[numeric] = frame[numeric].fillna(medians)
+    return frame
 
 
-def _engineer_features(df):
-    if df is None:
+def _engineer_features(frame):
+    if frame is None:
         return None
-    # example feature: row-level null count (often signal-bearing)
-    df["__n_nulls__"] = df.isnull().sum(axis=1)
-    return df
+    # Compute this before imputation so it measures the original data quality.
+    frame["__n_nulls__"] = frame.isnull().sum(axis=1)
+    return frame
 
 
-train_df = _impute_numeric(train_df)
-test_df = _impute_numeric(test_df)
+train_missing_before = train_df.isna().sum() if train_df is not None else None
+
 train_df = _engineer_features(train_df)
 test_df = _engineer_features(test_df)
-print("[processing] imputation + feature engineering done")
+train_df = _impute_numeric(train_df)
+test_df = _impute_numeric(test_df)
+
+if train_df is not None:
+    numeric_after = len(train_df.select_dtypes(include=[np.number]).columns)
+    print(f"[processing] train shape after preparation: {train_df.shape}")
+    print(f"[processing] numeric columns available to the model: {numeric_after}")
+    print("[processing] added __n_nulls__ before numeric median imputation")
+if test_df is not None:
+    print(f"[processing] test shape after preparation: {test_df.shape}")
+
+
+# %% [markdown]
+# ## Preparation impact
+#
+# Numeric imputation should remove numeric missingness without silently
+# discarding categorical columns.  This compact chart verifies that behavior.
+
+# %%
+if plt is not None and train_df is not None and train_missing_before is not None:
+    numeric_names = list(train_df.select_dtypes(include=[np.number]).columns)
+    before = train_missing_before.reindex(numeric_names).fillna(0)
+    after = train_df[numeric_names].isna().sum().reindex(numeric_names).fillna(0)
+    impact = pd.DataFrame({"before": before, "after": after})
+    impact = impact[impact["before"] > 0].head(30)
+    if not impact.empty:
+        ax = impact.plot.bar(figsize=(12, 4), color=["#fc8d62", "#66c2a5"])
+        ax.set_ylabel("Missing values")
+        ax.set_title("Numeric missingness before and after preparation")
+        plt.tight_layout()
+        plt.show()
+        plt.close()
+    else:
+        print("[processing] no numeric missingness chart needed")
+else:
+    print("[processing] preparation chart skipped")

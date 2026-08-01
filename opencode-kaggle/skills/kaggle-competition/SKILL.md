@@ -152,16 +152,17 @@ competitions (where the notebook is the submission and Kaggle scores it).
 ## Cell segregation
 
 The competition harness uses the **percent-format** cell delimiter convention
-(`# %%`) inside ``code.py`` so that each pipeline node renders as its **own
-notebook cell** on Kaggle:
+(`# %%`) inside ``code.py`` so each pipeline step can render as a readable
+sequence of notebook cells on Kaggle:
 
 - ``_append_code`` prepends a ``# %%`` marker before every node's rendered
   code. The assembled ``code.py`` stays a single editable flat file (the source
   of truth) while the markers tell the injection layer where to split.
 - On push, ``kaggle_nb.set_notebook_code`` splits the flat ``code.py`` on
   ``# %%`` lines into separate code cells.  The marker lines themselves are
-  **stripped** from the published notebook — cells start with the node's own
-  header comment (e.g. ``# DataIngestion_Node - Traditional ML``).
+  **stripped** from the published notebook. The ML templates use narrative
+  Markdown headings and decision logs instead of placing ``*_Node`` labels in
+  generated cell contents; node names remain available in CLI output/state.
 - A ``# %% [markdown]`` marker (optional) produces a **markdown cell** — useful
   for narrative or instructions between pipeline steps.  Leading ``# `` comment
   prefixes are stripped so the notebook renders clean Markdown.
@@ -174,8 +175,8 @@ notebook cell** on Kaggle:
   ``write-code`` / ``push`` commands in ``kaggle-notebook``).
 
 This means every run of ``/competition`` produces a **well-segregated, readable
-notebook** — one cell per pipeline node, with each iteration's
-experimentation/evaluation pair in its own cell.
+notebook** — multiple documented cells per pipeline step, with each iteration's
+experimentation/evaluation pair in its own sequence.
 
 ---
 
@@ -281,6 +282,10 @@ to improve the model; the harness re-injects it into the notebook on push.
 - Always keep `competition_sources=[<comp>]` for notebook submissions.
 - Competition names are validated with the same path-traversal-safe `validate_slug`
   used by `kaggle-notebook`.
+- The ML templates bound input discovery, EDA samples/output, correlation plots,
+  model validation/training budgets, diagnostic prediction batches, and CSV
+  formula-like values to keep generated notebooks safer on untrusted or large
+  competition inputs.
 - If `kaggle` is not installed, instruct the user to run the `kaggle-notebook`
   setup (`setup.ps1` / `kaggle_nb.py setup`).
 - When generating Python code, favour Kaggle-preinstalled libraries: `numpy`,
