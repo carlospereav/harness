@@ -1,360 +1,249 @@
-# Harness — Global Development Harness for OpenCode
+# Harness
 
-Two **decoupled** parts that ship from this repo and install into the global
-opencode config (`~/.config/opencode/`):
+**A safety-first OpenCode harness for disciplined software delivery and private Kaggle workflows.**
 
-| Part | Source tree | Purpose |
-|---|---|---|
-| **Harness** | `opencode/` | The original development workflow: plan, implement, evaluate (with retry-loop), security review, and certified commit+push. Works across **all projects**. |
-| **Kaggle opencode extensions** | `opencode-kaggle/` | Private-Kaggle notebook editing (`/kaggle`) and a universal Kaggle competition harness (`/competition`). Fully self-contained in the `opencode-kaggle/` tree. |
+[![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![PowerShell](https://img.shields.io/badge/installer-PowerShell-5391FE.svg)](sync.ps1)
+[![Python](https://img.shields.io/badge/helpers-Python-3776AB.svg)](opencode-kaggle/)
 
-Both parts are synced with the same `sync.ps1` installer and land side-by-side
-under `~/.config/opencode/` so they share the existing `harness` primary agent.
-They no longer share a source tree: each owns its own `commands/` and `skills/`.
+Harness turns an OpenCode session into a repeatable workflow:
 
-Every file in either tree is opencode configuration (agents, commands, skills),
-just split by concern: the generic dev-workflow harness in `opencode/`, the
-Kaggle-specific skills/commands in `opencode-kaggle/`.
-
-## How it works
-
-The two trees are stored in this repo and synced to your global opencode config
-via a PowerShell script:
-
-```
-harness/
-├── opencode/             # SOURCE: original harness (AGENTS.md, agents/, commands/, skills/)
-├── opencode-kaggle/     # SOURCE: Kaggle opencode extensions (commands/, skills/)
-└── sync.ps1              # installs BOTH trees into ~/.config/opencode/
+```text
+investigate -> plan -> approve -> implement -> evaluate -> security review -> deliver
 ```
 
-Once synced, opencode detects the skills, agents, and commands globally. When
-you type `/harness <task>`, `/kaggle <task>` or `/competition <task>` in any
-project, opencode runs the corresponding workflow.
+It also brings private Kaggle notebook editing and a universal competition pipeline into the same command-driven setup.
 
-## Installation
+## What lives here?
+
+This repository contains two deliberately decoupled source trees. Both are installed side-by-side into the global OpenCode configuration at `~/.config/opencode/`.
+
+| Source tree | Command surface | Purpose |
+| --- | --- | --- |
+| `opencode/` | `/harness` | Generic plan, implementation, evaluation, security-review, commit, and push workflow for any project. |
+| `opencode-kaggle/` | `/kaggle`, `/competition` | Private Kaggle notebook automation and an ML/GenAI competition pipeline. |
+
+The trees share the `harness` primary agent after installation, but each owns its own commands and skills in this repository.
+
+## Quick start
 
 ```powershell
-cd harness
-.\sync.ps1 -DryRun            # preview what will change (both trees)
-.\sync.ps1                    # install both trees to ~/.config/opencode/
-.\sync.ps1 -OnlyHarness       # install ONLY the original harness
-.\sync.ps1 -OnlyKaggle        # install ONLY the Kaggle opencode extensions
+.\sync.ps1 -DryRun       # preview the install
+.\sync.ps1              # install both source trees
 ```
 
-Restart opencode after syncing.
+Restart OpenCode after syncing, then use any command in any project:
 
-## What gets installed (original harness — from `opencode/`)
-
-| Path | Purpose |
-|---|---|
-| `AGENTS.md` | Always-on global rule: route implement tasks through harness |
-| `agents/harness.md` | Primary agent with baked-in permissions (task allowlist, destructive deny, commit/push ask). Structural enforcement of the protocol. |
-| `agents/evaluator.md` | Hidden subagent, `edit: deny`, `task: deny`: impartial verification of criteria |
-| `agents/security-auditor.md` | Hidden subagent, `edit: deny`, `task: deny`: vulnerability audit before commit |
-| `skills/harness-plan/` | Phase 1+2: investigate project + define plan with acceptance criteria |
-| `skills/harness-implement/` | Phase 3: implement the approved plan |
-| `skills/harness-evaluate/` | Phase 4: evaluate via read-only `evaluator` subagent; retry up to 3x |
-| `skills/harness-security-review/` | Phase 5: audit git diff via read-only `security-auditor` subagent; commit+push |
-| `commands/harness.md` | `/harness <task>` command that kicks off the full loop (`agent: harness`) |
-
-## What gets installed (Kaggle extensions — from `opencode-kaggle/`)
-
-| Path | Purpose |
-|---|---|
-| `skills/kaggle-notebook/` | Create, edit and push **private** Kaggle notebooks (kernels). Notebook code lives outside any git repo. |
-| `skills/kaggle-competition/` | Universal Kaggle competition harness: 5-node pipeline (DataIngestion -> DataProcessing -> Experimentation -> Evaluation -> DeploymentSync), ML or GenAI, file or notebook submission. |
-| `commands/kaggle.md` | `/kaggle <task>` command (`agent: harness`). |
-| `commands/competition.md` | `/competition <task>` command (`agent: harness`). |
-
-The `kaggle-competition` skill reuses `kaggle-notebook` for ALL Kaggle
-connectivity (credentials, workspace, notebook injection, privacy, slug safety)
-— nothing Kaggle-related is duplicated.
-
-## Workflow (original harness)
-
-```
+```text
 /harness "add pagination to /users"
-  -> harness-plan (investigate + define criteria, WAIT for approval)
-  -> harness-implement (write code)
-  -> harness-evaluate -> @evaluator (verify rubric)
-       fail -> back to implement (max 3 iterations)
-  -> harness-security-review -> @security-auditor (audit diff)
-       HIGH finding -> back to implement
-  -> git commit (user approves via ask gate)
-  -> git push   (user approves via ask gate)
+/kaggle "create a private notebook that explores a dataset"
+/competition "build and evaluate a private notebook for <competition>"
 ```
 
-## Prerequisites
+The installer never edits `opencode.jsonc`. Permissions are defined by the installed harness agent.
 
-The harness agent bakes in all required permissions (task allowlist, git gates,
-destructive deny). No manual `opencode.jsonc` configuration is needed for
-commit/push approval — it's enforced structurally by the agent.
+## The generic harness
 
-The sync script **never** touches your `opencode.jsonc`.
+### Workflow
 
-## Optional: different models per role
-
-The evaluator and security-auditor subagents inherit your primary model by
-default. To use a faster/cheaper model for reviews, uncomment and set the
-`model` field in:
-
-- `opencode/agents/evaluator.md`
-- `opencode/agents/security-auditor.md`
-
-Example: `model: anthropic/claude-haiku-4-20250514`
-
-Run `sync.ps1` again after editing (omit `-OnlyKaggle` so the harness tree is
-included).
-
-## Repository structure
-
+```text
+/harness <task>
+     |
+     v
+ harness-plan       investigate the project and write acceptance criteria
+     |
+     v
+ user approval      the plan must be explicitly approved
+     |
+     v
+ harness-implement  make the approved changes
+     |
+     v
+ harness-evaluate   @evaluator verifies every criterion
+     |       ^
+     |       +-- failures return to implementation, up to 3 iterations
+     v
+ harness-security-review  @security-auditor audits git diff HEAD
+     |
+     +-- HIGH finding: fix, evaluate again, and re-audit
+     v
+ commit + push       each publishing action requires a fresh user approval
 ```
+
+### Safety model
+
+The primary agent is intentionally restrictive:
+
+- **Deny by default:** commands not explicitly allow-listed ask for approval.
+- **Task allowlist:** only the read-only `evaluator` and `security-auditor` subagents can be spawned.
+- **Publish ask gate:** `git commit`, `git push`, and GitHub publishing operations require explicit approval.
+- **Destructive denies:** force-push, hard reset, branch/tag deletion, stash clearing, and similar operations are denied.
+- **Chaining protection:** shell separators such as `;`, `&&`, `||`, and `|` are denied by the permission rules.
+
+The installed agents are:
+
+| Agent | Role |
+| --- | --- |
+| `harness` | Primary workflow coordinator with baked-in permissions. |
+| `evaluator` | Hidden, read-only rubric runner. It verifies criteria but cannot edit, commit, or push. |
+| `security-auditor` | Hidden, read-only diff auditor that classifies findings as HIGH, MEDIUM, or LOW. |
+
+## Kaggle extensions
+
+The Kaggle tree is self-contained and reuses `kaggle-notebook` for credentials, workspace handling, notebook injection, privacy, and slug validation.
+
+### `/kaggle`: private notebook editing
+
+The `kaggle-notebook` skill scaffolds, edits, pulls, pushes, and inspects Kaggle notebooks through `kaggle_nb.py`.
+
+```powershell
+python opencode-kaggle\skills\kaggle-notebook\scripts\setup.ps1
+python opencode-kaggle\skills\kaggle-notebook\scripts\kaggle_nb.py new <slug> --title "<title>" --gpu --internet
+python opencode-kaggle\skills\kaggle-notebook\scripts\kaggle_nb.py write-code <slug> --from code.py
+python opencode-kaggle\skills\kaggle-notebook\scripts\kaggle_nb.py push <slug> --dry-run
+```
+
+Available helper operations include `setup`, `new`, `pull`, `write-code`, `append-code`, `push`, `status`, `output`, and `list`.
+
+Privacy is a design constraint, not a convention:
+
+- Kaggle metadata is forced to `is_private=true`.
+- Notebook code lives outside this repository, by default under `~/kaggle-workspace`.
+- Credentials and notebook workspaces are protected by `.gitignore`.
+- `--dry-run` validates pushes without contacting Kaggle.
+- `# %%` and `# %% [markdown]` delimiters can split `code.py` into readable notebook cells; files without markers remain backward-compatible single-cell notebooks.
+
+### `/competition`: universal ML and GenAI pipeline
+
+The `kaggle-competition` skill supports both traditional data-science competitions and Generative AI/code competitions, with file or notebook submission routes.
+
+```text
+DataIngestion -> DataProcessing -> Experimentation -> Evaluation -> DeploymentSync
+```
+
+| Node | Responsibility |
+| --- | --- |
+| `DataIngestion_Node` | Discover and read competition inputs; detect ML/GenAI flavor and submission mode. |
+| `DataProcessing_Node` | Impute, normalize, engineer features, tokenize, chunk, embed, or structure prompts. |
+| `Experimentation_Node` | Train, tune, probe, or fine-tune; feeds the optimization loop. |
+| `Evaluation_Node` | Emit the local metric that updates `best_local_score`. |
+| `DeploymentSync_Node` | Validate metadata and submit a file or push a private notebook only when the gate passes. |
+
+#### Plan before implementation
+
+Competition work has its own persistent approval workflow:
+
+```powershell
+python opencode-kaggle\skills\kaggle-competition\scripts\kaggle_comp.py init <comp> --mode ml --submission notebook
+python opencode-kaggle\skills\kaggle-competition\scripts\kaggle_comp.py context <comp> --top 5
+python opencode-kaggle\skills\kaggle-competition\scripts\kaggle_comp.py plan <comp>
+# inspect and present plan.md; wait for explicit user approval
+python opencode-kaggle\skills\kaggle-competition\scripts\kaggle_comp.py plan <comp> --approve
+python opencode-kaggle\skills\kaggle-competition\scripts\kaggle_comp.py run <comp> --require-plan
+```
+
+`plan.md` records schema discoveries, node approaches, validation, metrics, budgets, risks, and acceptance criteria. Approval is bound to the exact plan contents and relevant run configuration. Use `--force` to replace a plan; use `--allow-unplanned` only for an explicit legacy-recovery bypass.
+
+The `context` command ranks public notebooks by votes and writes readable digests under the competition workspace's `context/` directory before implementation begins.
+
+#### Metrics, state, and optimization
+
+Generated evaluation code must print a parseable marker:
+
+```python
+print(f"#METRIC:f1={score:.4f}")
+```
+
+The resumable `competition_state.json` tracks the current node, flavor, submission mode, primary metric, direction, iterations, best score, plan approval, and history. With `--max-iters N` greater than one, the harness loops through experimentation and evaluation until it reaches the iteration limit or a plateau. Deployment occurs only after a strict improvement; `--simulate improve|constant|degrade` exercises this gate offline.
+
+#### Submission routing
+
+```text
+submit --mode file     -> kaggle competitions submit -f <file> ...
+submit --mode notebook -> kaggle kernels push -p <competition-workspace>
+submit --mode auto     -> file when --from is supplied, otherwise notebook
+```
+
+The assembled `code.py` is the editable source of truth. Percent-format markers (`# %%`) turn pipeline sections into separate code cells, and `# %% [markdown]` creates Markdown cells. Node labels stay readable in the notebook while the flat source remains easy to edit.
+
+The competition helper supports:
+
+```text
+setup, list, files, init, plan, data, context, detect, render, state,
+run, submit-file, push-notebook, submit, status, leaderboard
+```
+
+Use `--dry-run` for push, submit, data, and remote status operations when working without credentials or network access.
+
+## Installation and synchronization
+
+From the repository root:
+
+```powershell
+.\sync.ps1 -DryRun
+.\sync.ps1
+.\sync.ps1 -OnlyHarness
+.\sync.ps1 -OnlyKaggle
+```
+
+`sync.ps1` performs an additive merge into `~/.config/opencode/`, overwriting source files while leaving unrelated installed files alone. It excludes `__pycache__` artifacts and runs an **ask-gate self-check** before syncing the harness tree. The check verifies that required approval and destructive-deny patterns exist and are ordered correctly.
+
+## Repository map
+
+```text
 harness/
-├── opencode/                         # original harness (source of truth)
-│   ├── AGENTS.md
+├── opencode/                                  # generic harness source
+│   ├── AGENTS.md                              # always-on workflow rules
 │   ├── agents/
-│   │   ├── harness.md
-│   │   ├── evaluator.md
-│   │   └── security-auditor.md
-│   ├── commands/
-│   │   └── harness.md
+│   │   ├── harness.md                         # primary agent + permissions
+│   │   ├── evaluator.md                       # read-only evaluation agent
+│   │   └── security-auditor.md                # read-only security agent
+│   ├── commands/harness.md                    # /harness
 │   └── skills/
 │       ├── harness-plan/SKILL.md
 │       ├── harness-implement/SKILL.md
 │       ├── harness-evaluate/SKILL.md
 │       └── harness-security-review/SKILL.md
-├── opencode-kaggle/                 # Kaggle opencode extensions (decoupled)
+├── opencode-kaggle/                           # Kaggle source, decoupled
 │   ├── commands/
-│   │   ├── kaggle.md
-│   │   └── competition.md
+│   │   ├── kaggle.md                          # /kaggle
+│   │   └── competition.md                     # /competition
 │   └── skills/
 │       ├── kaggle-notebook/
 │       │   ├── SKILL.md
-│       │   └── scripts/  (kaggle_nb.py, setup.ps1, smoke_test.py)
+│       │   └── scripts/                        # CLI, setup, smoke test
 │       └── kaggle-competition/
 │           ├── SKILL.md
-│           ├── scripts/  (kaggle_comp.py, smoke_test.py)
-│           └── templates/ (genai/, ml/)
-├── sync.ps1
+│           ├── scripts/                        # CLI and smoke test
+│           └── templates/                      # ML and GenAI node code
+├── sync.ps1                                   # installer and safety check
+├── .gitignore                                 # workspace and credential guard
+├── LICENSE                                    # MIT
 └── README.md
 ```
 
-## Adding new skills or agents
+## Development and verification
 
-For the **harness** tree:
-
-1. Create the file under `opencode/skills/<name>/SKILL.md` or
-   `opencode/agents/<name>.md`.
-2. Run `.\sync.ps1` (or `.\sync.ps1 -OnlyHarness`).
-3. Commit to version them.
-
-For the **Kaggle** tree:
-
-1. Create the file under `opencode-kaggle/skills/<name>/SKILL.md` or
-   `opencode-kaggle/commands/<name>.md`.
-2. Run `.\sync.ps1 -OnlyKaggle`.
-3. Commit to version them.
-
-## Removing a skill or agent
-
-Delete the file from this repo and commit. Then manually delete the
-corresponding file from `~/.config/opencode/skills/<name>/` or
-`~/.config/opencode/agents/<name>.md`. The sync script is additive only
-(it overwrites but does not delete stale files from the target).
-
-# Kaggle opencode extensions
-
-## Kaggle Notebook editing system
-
-The `kaggle-notebook` skill + `/kaggle` command let opencode create, edit and
-push **private** Kaggle notebooks (kernels) automatically. Notebook source code
-lives in a workspace **outside** this git repo (`~/kaggle-workspace` by
-default) so it never leaks to GitHub.
-
-### One-time setup
+When changing a Kaggle helper or template:
 
 ```powershell
-.\opencode-kaggle\skills\kaggle-notebook\scripts\setup.ps1
-```
-
-This installs `kaggle` + `nbformat`, creates the workspace, and checks for
-Kaggle credentials at `~/.kaggle/kaggle.json`. If credentials are missing,
-get a token from https://www.kaggle.com/settings -> API -> Create New Token
-and save it as `~/.kaggle/kaggle.json`.
-
-### Usage
-
-```text
-/kaggle crea un notebook que analice el dataset <owner>/<dataset>
-```
-
-Under the hood the skill uses the helper CLI at
-`opencode-kaggle/skills/kaggle-notebook/scripts/kaggle_nb.py`:
-
-```text
-python kaggle_nb.py --help
-python kaggle_nb.py setup
-python kaggle_nb.py new <slug> [--title T] [--gpu] [--internet] [--dataset D]
-python kaggle_nb.py pull <owner>/<slug>
-python kaggle_nb.py write-code <slug> --from <file.py>
-python kaggle_nb.py append-code <slug> --from <file.py>
-python kaggle_nb.py push <slug> [--dry-run]
-python kaggle_nb.py status <owner>/<slug>
-python kaggle_nb.py output <owner>/<slug> [--to DIR]
-python kaggle_nb.py list [user]
-```
-
-### Privacy guarantees
-
-- Notebooks are pushed with `"is_private": "true"` in `kernel-metadata.json`.
-- Notebook source code lives in `~/kaggle-workspace` (override with
-  `KAGGLE_WORKSPACE`) which is **git-ignored** by this repo.
-- Credentials (`kaggle.json`) are **never** committed.
-- `git status` will never show notebook code or tokens.
-
-### Self-test (smoke test)
-
-A self-contained smoke test verifies the whole lifecycle (new -> write-code ->
-append-code -> push) without contacting Kaggle and without credentials — it
-uses `--dry-run` and a throwaway temp workspace. Run it with:
-
-```powershell
-python .\opencode-kaggle\skills\kaggle-notebook\scripts\smoke_test.py
-python .\opencode-kaggle\skills\kaggle-notebook\scripts\smoke_test.py -v       # verbose
-python .\opencode-kaggle\skills\kaggle-notebook\scripts\smoke_test.py --keep  # keep temp workspace
-```
-
-Exit code 0 means all checks passed. It covers syntax, the CLI help, the
-scaffolding of a private notebook, code injection, dry-run push, and path
-traversal rejection (slug + owner). No network or `~/.kaggle/kaggle.json`
-required.
-
-## Kaggle Competition harness
-
-The `kaggle-competition` skill + `/competition` command implement a
-**universal** Kaggle competition harness as a 5-node pipeline with an
-optimization loop. It works for both **Traditional ML / data-science**
-competitions (CSV `submission.csv`) and **Generative AI / LLM** competitions
-(notebook/code submission), switching submission paths automatically. It
-**reuses the `kaggle-notebook` skill for all Kaggle connectivity** (credentials,
-workspace, notebook injection, privacy, slug safety) — nothing Kaggle-related
-is duplicated.
-
-### The 5 nodes
-
-1. **DataIngestion_Node** — load raw data from `/kaggle/input/<comp>`.
-   ML: CSVs into pandas. GenAI: JSONL corpora / text / vector stores. Also
-   detects submission mode (`file` vs `notebook`) and flavor (`ml` vs `genai`).
-2. **DataProcessing_Node** — transform into the engine's exact shape.
-   ML: imputation, normalization, feature engineering. GenAI: tokenization,
-   chunking, embeddings, ChatML structuring.
-3. **Experimentation_Node** *(the optimization loop)* — train, tune, read
-   Jupyter stdout. ML: LightGBM/RF, CV, hyperparameter search. GenAI: LoRA/QLoRA
-   fine-tuning, generation probes, temperature/Top-P tuning.
-4. **Evaluation_Node** — compute the local success metric feeding
-   `best_local_score`. ML: F1 / ROC-AUC / RMSE. GenAI: RAGAS, BERTScore,
-   LLM-as-a-Judge.
-5. **DeploymentSync_Node** — validate `kernel-metadata.json` and safely run
-   `kaggle kernels push -p` (notebook) or `kaggle competitions submit` (file).
-   Only fires when the submission gate passes.
-
-### The metric convention
-
-Generated evaluation code MUST print a parseable marker:
-
-```python
-print(f"#METRIC:f1={score:.4f}")
-print(f"#METRIC:rmse={rmse:.4f}")        # minimize=True in state
-print(f"#METRIC:bertscore={score:.4f}")
-```
-
-The harness parses every `#METRIC:name=value` line in the notebook's stdout and
-selects the one matching `state.primary_metric`. Direction-aware
-(`state.minimize`): RMSE -> lower wins, F1 -> higher wins.
-
-### Global state (`competition_state.json`)
-
-Lives in the competition workspace (`$KAGGLE_WORKSPACE/competitions/<comp>/`)
-and is **resumable**. It tracks `submission_mode`, `ai_mode`, `current_node`,
-`primary_metric`, `minimize`, `best_local_score`, `best_iteration`,
-`iterations`, `max_iterations`, `plateau_patience`, and `history`.
-
-### Optimization loop & termination
-
-```text
-run --max-iters 1        # single-pass: walk all 5 nodes once and deploy
-run --max-iters N>1      # optimization loop: Experimentation <-> Evaluation -> gate
-                          #   gate: done (max-iters) | stop (plateau) | iterate
-                          #   deploy fires only if >=1 strict improvement (gate)
-```
-
-`--simulate {improve,constant,degrade}` is a **dry-run only** knob to exercise
-the loop and gate offline without network or credentials.
-
-### Submission routing
-
-```text
-submit --mode file   -> kaggle competitions submit -f <file> -m <msg> <comp>
-submit --mode notebook -> kaggle kernels push -p <comp-dir> (after injecting code.py)
-submit --mode auto   -> file if --from <file> supplied, else notebook
-```
-
-### Usage
-
-```text
-/competition build a private GenAI notebook for <comp> and run one optimization pass
-```
-
-Helper CLI at `opencode-kaggle/skills/kaggle-competition/scripts/kaggle_comp.py`:
-
-```text
-python kaggle_comp.py --help
-python kaggle_comp.py setup
-python kaggle_comp.py init <comp> [--mode ml|genai] [--submission auto|file|notebook] [--gpu] [--internet]
-python kaggle_comp.py data <comp> [--dry-run]
-python kaggle_comp.py detect <comp> [--from F] [--dry-run]
-python kaggle_comp.py render <comp> <node> [--mode ml|genai] [--to F]
-python kaggle_comp.py state <comp> [--show] [--update-metric NAME=VAL]
-python kaggle_comp.py run <comp> [--max-iters N] [--simulate improve|constant|degrade] [--dry-run]
-python kaggle_comp.py submit <comp> [--mode auto|file|notebook] [--from F] [-m msg] [--dry-run]
-python kaggle_comp.py status <comp> [--dry-run]
-python kaggle_comp.py leaderboard <comp> [--dry-run]
-```
-
-`<node>` for `render`: `ingestion | processing | experimentation | evaluation | deployment`.
-
-Competition workspace (all OUTSIDE any git repo):
-
-```text
-~/kaggle-workspace/competitions/<comp>/
-  competition_state.json   notebook.ipynb   kernel-metadata.json   code.py   data/
-```
-
-### Privacy guarantees (inherited from `kaggle-notebook`)
-
-- Notebooks pushed with `"is_private": "true"`, with `competition_sources=[<comp>]`.
-- Workspace + credentials never committed; `.gitignore` excludes them.
-- Competition names validated with the same path-traversal-safe `validate_slug`.
-- `git status` never shows competition code, state, or tokens.
-
-### Self-test (smoke test)
-
-A self-contained smoke test covers the whole pipeline + routing + loop/gate
-logic with `--dry-run` and a throwaway temp workspace — no network, no
-credentials:
-
-```powershell
-python .\opencode-kaggle\skills\kaggle-competition\scripts\smoke_test.py
+python -m py_compile opencode-kaggle\skills\kaggle-notebook\scripts\kaggle_nb.py
+python -m py_compile opencode-kaggle\skills\kaggle-competition\scripts\kaggle_comp.py
+python .\opencode-kaggle\skills\kaggle-notebook\scripts\smoke_test.py -v
 python .\opencode-kaggle\skills\kaggle-competition\scripts\smoke_test.py -v
-python .\opencode-kaggle\skills\kaggle-competition\scripts\smoke_test.py --keep
+.\sync.ps1 -DryRun
 ```
 
-Exit code 0 means all checks passed: helper syntax, help, `kaggle_nb` reuse,
-all 10 templates render to parseable Python with `#METRIC:` markers, init
-scaffolds a private notebook with `competition_sources`, state show/update +
-minimize direction, metric parser, 5-node run walk + dry-run push + privacy
-(ML and GenAI), submission routing (file/notebook/auto), `detect`, remote
-commands dry-run, path-traversal rejection, loop termination (max-iters +
-plateau), and submission gate (proceed/skip). No network or credentials
-required.
+The smoke tests use throwaway workspaces, dry-run behavior, and no Kaggle credentials or network. They cover notebook privacy, path-traversal rejection, cell injection, competition templates, plan approval, metric parsing, optimization gates, submission routing, and remote-command dry runs.
+
+## Security and privacy checklist
+
+- Never commit `kaggle.json`, credentials, notebook source, competition state, or competition data.
+- Keep Kaggle workspaces outside git; the repository ignores both `kaggle-workspace/` and `competitions/` as defense in depth.
+- Keep notebook metadata private and preserve `competition_sources` for competition notebooks.
+- Use `--dry-run` before any Kaggle push or submission.
+- Let the harness evaluator and security auditor complete before publishing code.
+
+## License
+
+Released under the [MIT License](LICENSE).
