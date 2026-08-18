@@ -219,6 +219,24 @@ This means every run of ``/competition`` produces a **well-segregated, readable
 notebook** — multiple documented cells per pipeline step, with each iteration's
 experimentation/evaluation pair in its own sequence.
 
+## Notebook readability contract
+
+The generated notebook is a deliverable, not only a scoring script. Code written
+or edited in ``code.py`` MUST follow these rules:
+
+- one logical statement per line; never chain statements with semicolons;
+- keep lines at or below 120 columns and split large cells into focused sections;
+- use descriptive names plus docstrings or comments for non-obvious decisions;
+- put a ``# %% [markdown]`` narrative cell before each code section;
+- preserve and extend the ingestion/processing EDA cells between iterations;
+  never replace the notebook with a model-only script, and keep Markdown in sync;
+- ML notebooks must include bounded missingness, target, distribution,
+  relationship, and validation/error visualizations;
+- run ``kaggle_comp.py lint <comp>`` before pushing and fix every finding.
+
+The competition flow treats ``code.py`` as the notebook source of truth, removing
+stale Markdown cells from earlier runs when the notebook is assembled.
+
 ---
 
 ## Helper CLI
@@ -236,6 +254,7 @@ kaggle_comp.py data <comp> [--to DIR] [--file F] [--dry-run]
 kaggle_comp.py context <comp> [--top N] [--list-only] [--dry-run]
 kaggle_comp.py detect <comp> [--mode ml|genai] [--from F] [--dry-run]
 kaggle_comp.py render <comp> <node> [--mode ml|genai] [--to F]
+kaggle_comp.py lint <comp>
 kaggle_comp.py state <comp> [--show] [--update-metric NAME=VAL]
 kaggle_comp.py run <comp> [--mode ml|genai] [--submission auto|file|notebook] [--from F] [--max-iters N] [--plateau-patience P] [--simulate improve|constant|degrade] [--require-plan|--allow-unplanned] [--dry-run]
 kaggle_comp.py submit-file <comp> --from <file> -m "msg" [--dry-run]

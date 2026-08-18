@@ -222,7 +222,13 @@ else:
 # used as an explicit fallback instead of hiding the failure.
 
 # %%
-if model is not None and validation_X is not None and validation_y is not None and len(np.unique(validation_y)) >= 2 and cv is not None:
+if (
+    model is not None
+    and validation_X is not None
+    and validation_y is not None
+    and len(np.unique(validation_y)) >= 2
+    and cv is not None
+):
     try:
         cv_scores = np.asarray(
             cross_val_score(model, validation_X, validation_y, cv=cv, scoring=scoring_name, error_score="raise"),

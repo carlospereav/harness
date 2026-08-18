@@ -351,6 +351,65 @@ if plt is not None and train_profile_df is not None:
                 plt.ylabel("Density")
                 plt.legend()
                 _finish_plot(f"Train/test distribution: {column}")
+
+    # 7. Boxplots expose skew and outliers without requiring a full pair plot.
+    for column in numeric_cols[:MAX_NUMERIC_PLOTS]:
+        values = pd.to_numeric(train_profile_df[column], errors="coerce").dropna()
+        if values.nunique() > 1:
+            plt.figure(figsize=(8, 2.8))
+            values.plot.box(vert=False, color="#1f78b4")
+            plt.xlabel(str(column))
+            _finish_plot(f"Outlier view: {column}")
+
+    # 8. Target relationships: binned numeric means and categorical target rates.
+    if target_col is not None and target_col in train_profile_df.columns:
+        target_values = pd.to_numeric(train_profile_df[target_col], errors="coerce")
+        if target_values.notna().sum() and target_values.nunique(dropna=True) <= 20:
+            relationship_frame = train_profile_df.copy()
+            relationship_frame["__target_numeric__"] = target_values
+            for column in numeric_cols[:8]:
+                if column == target_col:
+                    continue
+                try:
+                    bins = pd.qcut(relationship_frame[column], q=8, duplicates="drop")
+                    rates = relationship_frame.groupby(bins, observed=False)["__target_numeric__"].mean().dropna()
+                except Exception:
+                    rates = pd.Series(dtype=float)
+                if len(rates) >= 2:
+                    plt.figure(figsize=(9, 3.5))
+                    rates.plot(marker="o", color="#e31a1c")
+                    plt.ylabel("Mean target")
+                    plt.xlabel(str(column))
+                    _finish_plot(f"Target relationship: {column}")
+            for column in [c for c in categorical_cols if c != target_col][:6]:
+                grouped = relationship_frame.assign(
+                    __category__=relationship_frame[column].astype("string").fillna("<missing>")
+                ).groupby("__category__")["__target_numeric__"].agg(["mean", "count"])
+                grouped = grouped[grouped["count"] >= max(2, len(relationship_frame) // 500)].nlargest(12, "count")
+                if not grouped.empty:
+                    plt.figure(figsize=(9, 4))
+                    grouped["mean"].sort_values().plot.barh(color="#756bb1")
+                    plt.xlabel("Mean target")
+                    _finish_plot(f"Target rate by {column}")
+
+    # 9. Print concise takeaways so decisions remain documented in plain text.
+    print("[eda] takeaways:")
+    if not missing_table.empty:
+        print(
+            f"[eda]   highest missingness: {missing_table.index[0]!r} "
+            f"({missing_table.iloc[0]['missing_fraction']:.1%})"
+        )
+    if not unique_table.empty:
+        print(f"[eda]   highest cardinality: {unique_table.index[0]!r} ({int(unique_table.iloc[0])} unique)")
+    if len(numeric_cols) >= 2:
+        corr_pairs = train_profile_df[numeric_cols[:MAX_CORRELATION_COLUMNS]].corr().abs()
+        corr_pairs.values[np.tril_indices_from(corr_pairs)] = 0
+        if corr_pairs.size and np.isfinite(corr_pairs.to_numpy()).any():
+            pair = np.unravel_index(np.nanargmax(corr_pairs.to_numpy()), corr_pairs.shape)
+            print(
+                f"[eda]   strongest numeric association: {corr_pairs.index[pair[0]]!r} "
+                f"vs {corr_pairs.columns[pair[1]]!r} ({corr_pairs.iloc[pair]:.3f})"
+            )
 else:
     print("[eda] no plots rendered (missing train data or matplotlib)")
 

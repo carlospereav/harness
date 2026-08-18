@@ -16,6 +16,12 @@ Evaluation -> DeploymentSync). Generate Python that prints a
 Never commit notebook code or credentials to git. Use `--dry-run` to validate
 push/submit commands without hitting the Kaggle API.
 
+Keep generated notebooks readable: use one statement per line, no semicolon
+chaining, lines no longer than 120 columns, documented helper functions, and
+Markdown narrative cells. Preserve and extend the ML EDA/visualization cells
+between iterations; do not replace them with a model-only script. Run
+`kaggle_comp.py lint <comp>` and fix its findings before pushing.
+
 Before implementation, follow the plan phase: investigate the competition,
 run `plan <comp>`, fill `plan.md`, present the plan to the user, and **WAIT for
 explicit approval**. The user may switch models while waiting. After approval,

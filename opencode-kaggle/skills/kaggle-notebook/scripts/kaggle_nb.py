@@ -400,7 +400,7 @@ def split_code_into_cells(code: str) -> list[tuple[str, str]]:
     return cells
 
 
-def set_notebook_code(d: Path, code: str) -> None:
+def set_notebook_code(d: Path, code: str, *, preserve_markdown: bool = True) -> None:
     """Replace all code cells with cell(s) derived from *code*.
 
     Splits *code* on ``# %%`` percent-format delimiters into separate code
@@ -409,7 +409,9 @@ def set_notebook_code(d: Path, code: str) -> None:
     with scratch notebooks that use the ``write-code`` or ``push`` commands).
 
     Existing **non-code** cells (e.g. hand-edited narrative markdown) are
-    preserved in their original position; only code cells are replaced.
+    preserved in their original position by default; only code cells are
+    replaced. Set ``preserve_markdown=False`` when the source is the complete
+    notebook source of truth and stale narrative cells must be removed.
     """
     nb = load_notebook(d)
     new_cells = split_code_into_cells(code)
@@ -417,6 +419,11 @@ def set_notebook_code(d: Path, code: str) -> None:
         new_markdown_cell(src) if ctype == "markdown" else new_code_cell(src)
         for ctype, src in new_cells
     ]
+
+    if not preserve_markdown:
+        nb.cells = new_nb_cells
+        save_notebook(d, nb)
+        return
 
     code_cells = [c for c in nb.cells if c.cell_type == "code"]
 

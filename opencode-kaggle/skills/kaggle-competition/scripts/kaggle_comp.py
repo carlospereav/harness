@@ -52,6 +52,9 @@ import stat
 import sys
 import time
 import tempfile
+import ast
+import tokenize
+import io as _tokenize_io
 from pathlib import Path
 
 # --------------------------------------------------------------------------- #
@@ -108,6 +111,8 @@ MAX_CONTEXT_DIGEST_BYTES = 5 * 1024 * 1024
 MAX_CONTEXT_TOTAL_SECONDS = 600
 MAX_CONTEXT_TOTAL_BYTES = 50 * 1024 * 1024
 MAX_CONTEXT_TOTAL_FILES = 500
+NOTEBOOK_MAX_LINE_LENGTH = 120
+NOTEBOOK_MAX_CELL_LINES = 200
 
 
 # --------------------------------------------------------------------------- #
@@ -402,6 +407,72 @@ def _append_code(d: Path, code: str, *, cell: bool = False) -> None:
         code_py.write_text(prefix + code + "\n", encoding="utf-8")
 
 
+def lint_notebook_code(code: str, *, mode: str = "ml") -> list[str]:
+    """Return actionable readability issues found in competition notebook code."""
+    issues: list[str] = []
+    lines = code.splitlines()
+    long_lines = [index for index, line in enumerate(lines, 1)
+                  if len(line) > NOTEBOOK_MAX_LINE_LENGTH]
+    if long_lines:
+        preview = ", ".join(str(line) for line in long_lines[:8])
+        suffix = "..." if len(long_lines) > 8 else ""
+        issues.append(f"long lines > {NOTEBOOK_MAX_LINE_LENGTH} columns at lines {preview}{suffix}")
+
+    semicolon_lines: list[int] = []
+    try:
+        tokens = tokenize.generate_tokens(_tokenize_io.StringIO(code).readline)
+        semicolon_lines = sorted({token.start[0] for token in tokens
+                                  if token.type == tokenize.OP and token.string == ";"})
+    except (IndentationError, SyntaxError, tokenize.TokenError) as exc:
+        issues.append(f"source cannot be tokenized: {exc}")
+    if semicolon_lines:
+        preview = ", ".join(str(line) for line in semicolon_lines[:8])
+        suffix = "..." if len(semicolon_lines) > 8 else ""
+        issues.append(f"semicolon-chained statements at lines {preview}{suffix}")
+
+    markdown_cells = len(re.findall(r"(?im)^\s*#\s*%%\s*\[markdown\]", code))
+    cell_markers = len(re.findall(r"(?m)^\s*#\s*%%", code))
+    if cell_markers and not markdown_cells:
+        issues.append("no # %% [markdown] narrative cells found")
+
+    cells = kaggle_nb.split_code_into_cells(code)
+    if any(cell_type == "code" and len(body.splitlines()) > NOTEBOOK_MAX_CELL_LINES
+           for cell_type, body in cells):
+        issues.append(f"code cell exceeds {NOTEBOOK_MAX_CELL_LINES} lines")
+
+    try:
+        tree = ast.parse(code)
+        functions = [node for node in ast.walk(tree)
+                     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
+        comment_lines = sum(1 for line in lines if line.lstrip().startswith("#"))
+        if functions and not comment_lines and any(ast.get_docstring(node) is None for node in functions):
+            issues.append("helper functions have no docstrings or comments")
+    except SyntaxError as exc:
+        issues.append(f"source is not valid Python: {exc.msg} at line {exc.lineno}")
+
+    if mode == "ml" and not re.search(r"(?:plt\.|plot\(|\.plot\(|seaborn|matplotlib)", code):
+        issues.append("no plotting call detected; preserve or add visual EDA")
+    return issues
+
+
+def _print_notebook_lint(d: Path, *, mode: str = "ml") -> list[str]:
+    """Print a compact non-blocking lint report before a notebook push."""
+    code_path = d / kaggle_nb.CODE_PY
+    if not code_path.exists():
+        issues = [f"missing {kaggle_nb.CODE_PY}"]
+    else:
+        issues = lint_notebook_code(code_path.read_text(encoding="utf-8"), mode=mode)
+    if not issues:
+        print("  [lint] notebook readability checks passed")
+        return issues
+    print(f"  [lint] {len(issues)} issue(s); run `kaggle_comp.py lint {d.name}` for details")
+    for issue in issues[:5]:
+        print(f"  [lint] WARNING: {issue}")
+    if len(issues) > 5:
+        print(f"  [lint] ... {len(issues) - 5} additional issue(s)")
+    return issues
+
+
 def _run_node(comp: str, node: str, mode: str, d: Path, state: dict,
               workspace: str | None, *, iteration: int = 1) -> None:
     """Render a node template, append it to code.py as its own cell, advance the state."""
@@ -425,7 +496,12 @@ def _kaggle_push(comp: str, d: Path, dry_run: bool) -> int:
         code_newer = not nb_path.exists() or code_py.stat().st_mtime > nb_path.stat().st_mtime
         if code_newer:
             print(f"  injecting {code_py.name} into notebook (code.py is newer)")
-            kaggle_nb.set_notebook_code(d, code_py.read_text(encoding="utf-8"))
+            kaggle_nb.set_notebook_code(
+                d, code_py.read_text(encoding="utf-8"), preserve_markdown=False
+            )
+    state_path_local = d / STATE_FILE
+    state = json.loads(state_path_local.read_text(encoding="utf-8")) if state_path_local.exists() else None
+    _print_notebook_lint(d, mode=(state or {}).get("ai_mode", "ml"))
     _validate_meta_for_deploy(d, comp)
     return kaggle_nb._run(["kaggle", "kernels", "push", "-p", str(d)],
                           dry_run=dry_run, cwd=d)
@@ -965,6 +1041,27 @@ def cmd_render(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_lint(args: argparse.Namespace) -> int:
+    """Check a competition workspace's generated code without network access."""
+    d = comp_root(args.comp, args.workspace)
+    state = load_state(args.comp, args.workspace) or {}
+    code_path = d / kaggle_nb.CODE_PY
+    if not code_path.exists():
+        print(f"  [lint] missing {code_path}")
+        return 1
+    issues = lint_notebook_code(
+        code_path.read_text(encoding="utf-8"),
+        mode=state.get("ai_mode", "ml"),
+    )
+    if not issues:
+        print(f"  [lint] {code_path} passed notebook readability checks")
+        return 0
+    print(f"  [lint] {code_path}: {len(issues)} issue(s)")
+    for issue in issues:
+        print(f"  - {issue}")
+    return 1
+
+
 def cmd_state(args: argparse.Namespace) -> int:
     state = load_state(args.comp, args.workspace)
     if state is None:
@@ -1138,7 +1235,9 @@ def cmd_run(args: argparse.Namespace) -> int:
     _run_node(comp, "deployment", mode, d, state, args.workspace, iteration=i)
 
     # Assemble the notebook from code.py.
-    kaggle_nb.set_notebook_code(d, code_py.read_text(encoding="utf-8"))
+    kaggle_nb.set_notebook_code(
+        d, code_py.read_text(encoding="utf-8"), preserve_markdown=False
+    )
     print(f"  [run] notebook assembled at {d / 'notebook.ipynb'}")
 
     # Push failure: notebook is already assembled; skip final submission.
@@ -1308,7 +1407,9 @@ def cmd_submit(args: argparse.Namespace) -> int:
     # notebook
     code_py = d / kaggle_nb.CODE_PY
     if code_py.exists():
-        kaggle_nb.set_notebook_code(d, code_py.read_text(encoding="utf-8"))
+        kaggle_nb.set_notebook_code(
+            d, code_py.read_text(encoding="utf-8"), preserve_markdown=False
+        )
     rc = _kaggle_push(args.comp, d, args.dry_run)
     if rc == 0:
         _print_submit_to_competition_hint(args.comp, d)
@@ -1440,6 +1541,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--iteration", type=int, default=1)
     sp.add_argument("--to", help="write rendered code to this path (default: stdout)")
     sp.set_defaults(func=cmd_render)
+
+    sp = sub.add_parser("lint", help="check generated notebook code readability")
+    sp.add_argument("comp")
+    sp.set_defaults(func=cmd_lint)
 
     sp = sub.add_parser("state", help="show / update the competition state")
     sp.add_argument("comp")

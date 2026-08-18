@@ -121,7 +121,7 @@ def check_help(r: Results, _ws: Path) -> None:
     proc = subprocess.run([PY, str(HELPER), "--help"], capture_output=True, text=True)
     expected = ["setup", "list", "files", "init", "data", "context", "detect", "render",
                 "state", "run", "submit-file", "push-notebook", "submit",
-                "status", "leaderboard"]
+                 "status", "leaderboard", "lint"]
     ok_help = proc.returncode == 0 and all(e in proc.stdout for e in expected)
     missing = [e for e in expected if e not in proc.stdout]
     r.record(name, ok_help, f"rc={proc.returncode} missing={missing}")
@@ -202,49 +202,89 @@ def check_ml_template_quality(r: Results, _ws: Path) -> None:
             "MAX_OUTPUT_CHARS",
             "_iter_input_files",
             "_print_limited",
+            "Outlier view",
+            "Target relationship",
+            "[eda] takeaways",
         )
     )
+
     decision_signals = all(
         signal in texts["experimentation"]
         for signal in (
-            "target_reason",
-            "decision_log",
-            "Validation choice",
-            "learning_rate",
-            "MAX_TRAIN_ROWS",
-            "MAX_MODEL_FEATURES",
-            "MAX_MODEL_ITER",
-            "MAX_CV_ROWS",
+            "target_reason", "decision_log", "Validation choice", "learning_rate",
+            "MAX_TRAIN_ROWS", "MAX_MODEL_FEATURES", "MAX_MODEL_ITER", "MAX_CV_ROWS",
             "# %% [markdown]",
         )
     )
     diagnostics = all(
         signal in texts["evaluation"]
         for signal in (
-            "confusion_matrix",
-            "Actual versus predicted class counts",
-            "MAX_EVAL_ROWS",
-            "MAX_DIAGNOSTIC_ROWS",
-            "_predict_in_batches",
-            "#METRIC:",
+            "confusion_matrix", "Actual versus predicted class counts", "MAX_EVAL_ROWS",
+            "MAX_DIAGNOSTIC_ROWS", "_predict_in_batches", "#METRIC:",
         )
     )
     submission_safety = all(
         signal in texts["deployment"]
-        for signal in ("_sanitize_submission_value", "_sanitize_submission_header", "MAX_PREDICTION_BATCH_ROWS")
+        for signal in ("_sanitize_submission_value", "_sanitize_submission_header",
+                       "MAX_PREDICTION_BATCH_ROWS")
     )
     r.record(
         name,
-        labels_removed
-        and markdown_cells >= 8
-        and eda_signals
-        and decision_signals
-        and diagnostics
-        and submission_safety,
+        labels_removed and markdown_cells >= 8 and eda_signals and decision_signals
+        and diagnostics and submission_safety,
         f"labels_removed={labels_removed} markdown_cells={markdown_cells} "
         f"eda={eda_signals} decisions={decision_signals} diagnostics={diagnostics} "
         f"submission_safety={submission_safety}",
     )
+
+
+def check_notebook_lint(r: Results, ws: Path) -> None:
+    name = "04c notebook lint detects minified code and accepts readable code"
+    ugly = "# %%\n" + "x = 1; y = 2; " + ("value = 3 " * 30) + "\n"
+    clean = ("# %% [markdown]\n# Explain the step.\n# %%\n"
+             "import matplotlib.pyplot as plt\n\n"
+             "def documented(value):\n"
+             "    \"\"\"Return the input unchanged.\"\"\"\n"
+             "    return value\n\n"
+             "plt.plot([0, 1], [0, 1])\n")
+    ugly_issues = kaggle_comp.lint_notebook_code(ugly)
+    clean_issues = kaggle_comp.lint_notebook_code(clean)
+    r.record(name, any("long lines" in issue for issue in ugly_issues)
+             and any("semicolon" in issue for issue in ugly_issues)
+             and any("markdown" in issue for issue in ugly_issues)
+             and not clean_issues,
+             f"ugly={ugly_issues} clean={clean_issues}")
+
+
+def check_lint_cli(r: Results, ws: Path) -> None:
+    name = "04d lint CLI reports workspace issues without network access"
+    comp = "lintcli"
+    run_helper(["init", comp], ws)
+    code_path = ws / "competitions" / comp / "code.py"
+    code_path.write_text("# %%\nx = 1; y = 2; " + ("value = 3 " * 30) + "\n", encoding="utf-8")
+    bad_rc, bad_out, _ = run_helper(["lint", comp], ws)
+    r.record(name, bad_rc == 1 and "issue(s)" in bad_out and "semicolon" in bad_out,
+             f"rc={bad_rc} output={bad_out!r}")
+
+
+def check_markdown_source_of_truth(r: Results, ws: Path) -> None:
+    name = "04e competition assembly removes stale Markdown cells"
+    comp = "markdowntruth"
+    run_helper(["init", comp], ws)
+    d = ws / "competitions" / comp
+    kaggle_comp.kaggle_nb.set_notebook_code(
+        d,
+        "# %% [markdown]\n# Current documentation\n# %%\nvalue = 1\n",
+        preserve_markdown=False,
+    )
+    kaggle_comp.kaggle_nb.set_notebook_code(
+        d,
+        "# %%\nvalue = 2\n",
+        preserve_markdown=False,
+    )
+    notebook = json.loads((d / "notebook.ipynb").read_text(encoding="utf-8"))
+    markdown = [cell for cell in notebook["cells"] if cell["cell_type"] == "markdown"]
+    r.record(name, not markdown and "value = 2" in "".join(notebook["cells"][0]["source"]))
 
 
 def check_init(r: Results, ws: Path) -> None:
@@ -880,6 +920,9 @@ def main() -> int:
         check_import_kaggle_nb(r, ws)
         check_templates_and_render(r, ws)
         check_ml_template_quality(r, ws)
+        check_notebook_lint(r, ws)
+        check_lint_cli(r, ws)
+        check_markdown_source_of_truth(r, ws)
         check_init(r, ws)
         check_plan_scaffold(r, ws)
         check_plan_approve_gate(r, ws)
