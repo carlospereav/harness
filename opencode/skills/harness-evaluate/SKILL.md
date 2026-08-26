@@ -23,6 +23,8 @@ description:
 2. The **files modified or created** during implementation.
 3. The **relevant verification commands** (test, lint, build — from
    `package.json`, `AGENTS.md`, or detected during investigation).
+4. The LSP status and exact LSP criterion from the approved plan, if one was
+   enabled.
 
 The `evaluator` subagent is **read-only** (`edit: deny`). It can run
 verification commands and read files, but cannot modify anything. This
@@ -37,6 +39,11 @@ The evaluator returns a structured rubric: each criterion marked
 - ✅ PASS (criterion met, with evidence)
 - ❌ FAIL (criterion not met, with specific reason)
 - ⚠️ UNVERIFIABLE (no way to check, with explanation)
+
+For an enabled LSP criterion, mark it PASS only when the server is available
+and modified files have no severity-error diagnostics. Mark it UNVERIFIABLE
+when LSP is unavailable unless the approved plan explicitly made LSP required.
+Warnings do not fail the criterion unless the plan says otherwise.
 
 Decision:
 

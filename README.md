@@ -88,6 +88,22 @@ The installed agents are:
 | `evaluator` | Hidden, read-only rubric runner. It verifies criteria but cannot edit, commit, or push. |
 | `security-auditor` | Hidden, read-only diff auditor that classifies findings as HIGH, MEDIUM, or LOW. |
 
+### Optional LSP integration
+
+The generic harness can use a configured native Language Server Protocol (LSP)
+server for symbols, definitions, references, hover information, and diagnostics.
+LSP is optional and read-only:
+
+- The harness never installs dependencies or starts a language server manually.
+- A project configuration alone does not authorize a server; use only a trusted user-level server or one explicitly approved for the workspace.
+- An unavailable server is reported as `UNAVAILABLE` and does not block normal work.
+- Severity-error diagnostics in modified files can block evaluation when the approved plan enables that criterion.
+- Warnings are reported but do not block by default.
+- Security review remains independent of LSP output.
+
+The policy is defined in `opencode/skills/harness-lsp/SKILL.md` and is deployed
+by the normal `sync.ps1` flow.
+
 ## Kaggle extensions
 
 The Kaggle tree is self-contained and reuses `kaggle-notebook` for credentials, workspace handling, notebook injection, privacy, and slug validation.
@@ -232,6 +248,12 @@ python -m py_compile opencode-kaggle\skills\kaggle-competition\scripts\kaggle_co
 python .\opencode-kaggle\skills\kaggle-notebook\scripts\smoke_test.py -v
 python .\opencode-kaggle\skills\kaggle-competition\scripts\smoke_test.py -v
 .\sync.ps1 -DryRun
+```
+
+For the offline LSP integration smoke test:
+
+```powershell
+python opencode\skills\harness-lsp\smoke_test.py
 ```
 
 The smoke tests use throwaway workspaces, dry-run behavior, and no Kaggle credentials or network. They cover notebook privacy, path-traversal rejection, cell injection, competition templates, plan approval, metric parsing, optimization gates, submission routing, and remote-command dry runs.

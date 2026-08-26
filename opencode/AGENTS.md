@@ -4,8 +4,9 @@ When the user asks to implement, build, develop or create a feature, functionali
 component, module, endpoint or page, follow the harness protocol:
 
 1. Load `harness-plan` skill: investigate project, define a plan with explicit
-   measurable acceptance criteria. Present the plan to the user and WAIT for
-   explicit approval.
+   measurable acceptance criteria. Use the optional `harness-lsp` skill for
+   navigation and diagnostics when available. Present the plan to the user and
+   WAIT for explicit approval.
 2. Load `harness-implement` skill: implement the approved plan.
 3. Load `harness-evaluate` skill: spawn the `evaluator` subagent to verify every
    criterion. If any criterion fails, loop back to step 2 for only the failing

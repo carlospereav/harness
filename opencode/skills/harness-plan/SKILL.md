@@ -24,8 +24,11 @@ Understand the project before proposing anything.
 4. Identify:
    - Language and framework.
    - Project conventions: naming, folder structure, code style.
-   - Existing dependencies.
-   - Test framework and commands (from `package.json` scripts, `Makefile`, etc.).
+    - Existing dependencies.
+    - Test framework and commands (from `package.json` scripts, `Makefile`, etc.).
+    - Whether a configured LSP is available for the project's languages. If it
+      is unavailable, record `UNAVAILABLE` and continue without installing or
+      starting a server.
 
 Do not present this investigation to the user — use it internally.
 
@@ -37,8 +40,9 @@ Define WHAT will be built and HOW success will be measured.
 
 1. Create an implementation plan:
    - Files to create or modify.
-   - Technical approach and rationale.
-   - New dependencies if any.
+    - Technical approach and rationale.
+    - New dependencies if any.
+    - LSP status and whether diagnostics are advisory or blocking.
 
 2. Define **measurable acceptance criteria**. Every criterion must be
    answerable with YES or NO. Good examples:
@@ -48,6 +52,8 @@ Define WHAT will be built and HOW success will be measured.
    - "No linting errors: `npm run lint`"
    - "The page renders without exceptions in the browser"
    - "The endpoint `/api/users` returns 200 with a JSON array"
+   - "If LSP is available, modified files have zero severity-error diagnostics;
+     otherwise the result is recorded as UNAVAILABLE and does not block"
 
 3. **PRESENT the plan and criteria to the user and WAIT for explicit approval**
    before any code is written.
